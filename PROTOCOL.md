@@ -54,8 +54,17 @@ Ranked by priority (control holes first). Implemented verbs are marked.
     client always learns the guest is going down before it does. The command is
     `/usr/sbin/init 5`, overridable via the `HELIOS_SHUTDOWN_CMD` env var (used
     in dev so the default doesn't shut down the developer's Mac).
-- `run_command` -- fork/exec, returns stdout/stderr/exit code. [planned; needs
-  the cx CxProcess timeout/cwd extension, HELIOS_PLAN.md A3]
+- `run_command` -- run a shell command on the Sun. **[implemented]**
+  - request: `{ "verb":"run_command", "id":8, "cmd":"cc hello.c -o hello",
+              "cwd":"/export/home/me", "timeout_ms":60000 }`
+    (`cwd` and `timeout_ms` optional; absent cwd inherits, absent/<=0 timeout
+    waits indefinitely)
+  - result: `{ "exit_code":N, "output":"<combined stdout+stderr>",
+              "timed_out":bool }`
+  - `ok:true` means the command *ran*; a nonzero exit is reported in
+    `exit_code` (128+signal if killed), not as a daemon error. Only a
+    missing/invalid `cmd` is `ok:false`. Output is a JSON string (escaped);
+    file *content* still uses base64 (read_file/write_file).
 - `read_file` / `write_file` -- base64 content. [planned]
 - `list_dir` / `stat` -- directory listing + file metadata. [planned]
 - `search` -- grep/find on the Sun. [planned]

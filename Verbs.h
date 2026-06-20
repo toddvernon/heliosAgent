@@ -14,8 +14,17 @@
 
 #include <cx/base/string.h>
 
+class CxJSONObject;   // the parsed request object (forward decl)
+
 // Liveness handshake: agent name, version, protocol, hostname, daemon uptime.
 CxString verbHello( double id );
+
+// Run a shell command on the Sun. Reads "cmd" (required), "cwd" (optional), and
+// "timeout_ms" (optional) from the request; returns
+// { exit_code, output, timed_out }. ok:true means the command was *run* (a
+// nonzero exit is reported in exit_code, not as a daemon error). Backed by
+// CxProcess (fork/exec with cwd + timeout).
+CxString verbRun( double id, CxJSONObject *req );
 
 // Graceful shutdown. Returns an ACK ({status:"shutting down"}) and records the
 // intent; it does NOT exec anything itself, so dispatching it (e.g. from a unit

@@ -215,6 +215,12 @@ main( int argc, char** argv )
                 // _exit() so no destructors run -- handleConnection has already
                 // closed the connection fd, and the OS closes the rest.
                 server.close();
+                // Restore default SIGCHLD: this child serves one connection and
+                // never forks more connections, but run_command's CxProcess
+                // forks and waitpid()s a command. The inherited reapChildren
+                // handler would reap that command first and steal its exit
+                // status, so hand SIGCHLD back to the default here.
+                signal( SIGCHLD, SIG_DFL );
                 handleConnection( conn );
                 _exit( 0 );
             }

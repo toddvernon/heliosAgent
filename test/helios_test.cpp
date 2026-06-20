@@ -161,7 +161,7 @@ static void
 testPlannedVerb( void )
 {
     printf( "\n== planned-but-unimplemented verb ==\n" );
-    CxString resp = heliosDispatch( CxString( "{ \"verb\": \"run_command\", \"id\": 3 }" ) );
+    CxString resp = heliosDispatch( CxString( "{ \"verb\": \"read_file\", \"id\": 3 }" ) );
     CxJSONObject *o = parseObject( resp );
     check( o != (CxJSONObject*)0, "planned-verb response parses" );
     if ( o == (CxJSONObject*)0 ) return;
@@ -229,6 +229,79 @@ testResponseEscaping( void )
 
 
 static void
+testRunCommand( void )
+{
+    printf( "\n== run_command ==\n" );
+
+    // basic: echo, exit 0, output captured
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\": \"run_command\", \"id\": 8, \"cmd\": \"echo hello\" }" ) );
+        CxJSONObject *o = parseObject( resp );
+        check( o != (CxJSONObject*)0, "run_command response parses" );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 0 ) == 1, "run_command ok==true" );
+            check( getNumber( o, "id", -1 ) == 8, "run_command echoes id" );
+            CxJSONObject *r = getObject( o, "result" );
+            check( r != (CxJSONObject*)0, "run_command has result" );
+            if ( r != (CxJSONObject*)0 ) {
+                check( getNumber( r, "exit_code", -99 ) == 0, "echo: exit_code 0" );
+                check( contains( getString( r, "output" ), "hello" ), "echo: output has hello" );
+                check( getBool( r, "timed_out", 1 ) == 0, "echo: not timed out" );
+            }
+            delete o;
+        }
+    }
+
+    // nonzero exit: command ran, so ok==true; exit_code reports the failure
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\": \"run_command\", \"id\": 9, \"cmd\": \"exit 4\" }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 0 ) == 1, "nonzero exit still ok==true (command ran)" );
+            CxJSONObject *r = getObject( o, "result" );
+            check( r != (CxJSONObject*)0 && getNumber( r, "exit_code", -99 ) == 4, "nonzero: exit_code 4" );
+            delete o;
+        }
+    }
+
+    // missing cmd -> ok:false
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\": \"run_command\", \"id\": 10 }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 1 ) == 0, "missing cmd ok==false" );
+            check( contains( getString( o, "error" ), "cmd" ), "missing cmd error mentions cmd" );
+            delete o;
+        }
+    }
+
+    // cwd honored
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\": \"run_command\", \"id\": 11, \"cmd\": \"/bin/pwd\", \"cwd\": \"/\" }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            CxJSONObject *r = getObject( o, "result" );
+            check( r != (CxJSONObject*)0 && contains( getString( r, "output" ), "/" ), "cwd=/ output has /" );
+            delete o;
+        }
+    }
+
+    // timeout: ok==true (verb ran), result flags timed_out, exit_code -1
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\": \"run_command\", \"id\": 12, \"cmd\": \"sleep 5\", \"timeout_ms\": 300 }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 0 ) == 1, "timeout: ok==true (verb ran)" );
+            CxJSONObject *r = getObject( o, "result" );
+            check( r != (CxJSONObject*)0 && getBool( r, "timed_out", 0 ) == 1, "timeout: timed_out true" );
+            check( r != (CxJSONObject*)0 && getNumber( r, "exit_code", 0 ) == -1, "timeout: exit_code -1" );
+            delete o;
+        }
+    }
+}
+
+
+static void
 testShutdown( void )
 {
     printf( "\n== shutdown (ACK + intent flag, no real exec) ==\n" );
@@ -278,6 +351,7 @@ main( int argc, char **argv )
     testBadJson();
     testDefaultId();
     testResponseEscaping();
+    testRunCommand();
     testShutdown();
 
     printf( "\n======================\n" );
