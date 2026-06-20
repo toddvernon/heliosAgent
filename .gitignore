@@ -1,0 +1,17 @@
+# Build output directories (one per platform/arch)
+darwin_arm64/
+darwin_x86_64/
+linux_x86_64/
+linux_/
+sunos_sparc/
+sunos_/
+irix_/
+netbsd_/
+
+# Object/archive artifacts and cruft
+*.o
+*.a
+core
+a.out
+.DS_Store
+._*
