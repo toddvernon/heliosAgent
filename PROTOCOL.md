@@ -65,7 +65,28 @@ Ranked by priority (control holes first). Implemented verbs are marked.
     `exit_code` (128+signal if killed), not as a daemon error. Only a
     missing/invalid `cmd` is `ok:false`. Output is a JSON string (escaped);
     file *content* still uses base64 (read_file/write_file).
-- `read_file` / `write_file` -- base64 content. [planned]
+- `read_file` -- read a whole regular file. **[implemented]**
+  - request: `{ "verb":"read_file", "id":20, "path":"/etc/hosts" }`
+  - result: `{ "path":"...", "size":N, "mode":<low 12 perm bits, decimal>,
+              "encoding":"base64", "content":"<base64>" }`
+  - Content is base64 so the channel is byte-exact (NUL / high bytes safe);
+    raw bytes never pass through a JSON string. Regular files only: a missing
+    path, a non-existent file, or a non-regular target (dir/symlink/device) is
+    `ok:false` -- use `stat` to learn the type first.
+- `write_file` -- write a whole regular file, atomically. **[implemented]**
+  - request: `{ "verb":"write_file", "id":21, "path":"/etc/hosts",
+              "content":"<base64>", "mode":420 }` (`mode` optional, decimal of
+    the low 12 perm bits, e.g. 420 == 0644)
+  - result: `{ "path":"...", "bytes_written":N, "mode":<final perm bits>,
+              "created":bool }`
+  - Writes a temp file in the target's directory then `rename()`s over the
+    target, so a crash never leaves a half-file. Permission policy: an explicit
+    `mode` wins; else overwriting an existing file **preserves** its mode (and
+    owner, when the daemon runs as root) -- `rename()` installs a fresh inode,
+    so without this every write would silently reset perms and break scripts/
+    configs; else a new file defaults to 0644. mtime is deliberately **not**
+    preserved (a write stamps it to now so `make` rebuilds). Missing/invalid
+    `path` or `content`, or a non-regular existing target, is `ok:false`.
 - `list_dir` / `stat` -- directory listing + file metadata. [planned]
 - `search` -- grep/find on the Sun. [planned]
 

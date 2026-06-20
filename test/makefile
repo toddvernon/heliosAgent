@@ -70,11 +70,13 @@ APP_OBJECT_DIR=$(UNAME_S)_$(ARCH)
 
 LIB_CX_BASE_NAME=libcx_base.a
 LIB_CX_JSON_NAME=libcx_json.a
+LIB_CX_B64_NAME=libcx_b64.a
 LIB_CX_PROCESS_NAME=libcx_process.a
 
 # Base library must come last - the other libs depend on it.
 CX_LIBS = \
 	$(LIB_CX_PLATFORM_LIB_DIR)/$(LIB_CX_JSON_NAME)    \
+	$(LIB_CX_PLATFORM_LIB_DIR)/$(LIB_CX_B64_NAME)     \
 	$(LIB_CX_PLATFORM_LIB_DIR)/$(LIB_CX_PROCESS_NAME) \
 	$(LIB_CX_PLATFORM_LIB_DIR)/$(LIB_CX_BASE_NAME)
 

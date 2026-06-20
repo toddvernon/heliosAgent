@@ -10,8 +10,16 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include <cx/base/string.h>
+#include <cx/base/buffer.h>
+#include <cx/base/slist.h>
+#include <cx/b64/b64.h>
 #include <cx/json/json_factory.h>
 #include <cx/json/json_base.h>
 #include <cx/json/json_object.h>
@@ -114,6 +122,88 @@ contains( CxString haystack, const char *needle )
     return haystack.index( CxString( needle ) ) != -1;
 }
 
+// Test-side base64, same idiom as the verb code, so we can build request
+// content and verify response content independently of the daemon's helpers.
+static CxString
+b64EncodeT( const void *data, unsigned int len )
+{
+    CxB64Encoder enc;
+    CxSList< CxString > lines;
+    enc.process( (void*) data, len, lines );
+    enc.finalize( lines );
+    CxString out;
+    for ( unsigned int i = 0; i < lines.entries(); i++ ) {
+        out = out + lines.at( i );
+    }
+    return out;
+}
+
+static CxBuffer
+b64DecodeT( CxString b64 )
+{
+    CxB64Decoder dec;
+    CxSList< CxString > lines;
+    lines.append( b64 );
+    return dec.process( lines );
+}
+
+// Write raw bytes to a path with POSIX (the daemon-independent side of a
+// round-trip test). Returns 1 on success.
+static int
+writeRaw( const char *path, const void *data, unsigned int len, mode_t mode )
+{
+    int fd = open( path, O_WRONLY | O_CREAT | O_TRUNC, 0600 );
+    if ( fd < 0 ) return 0;
+    unsigned int w = 0;
+    const unsigned char *p = (const unsigned char*) data;
+    while ( w < len ) {
+        int n = write( fd, p + w, len - w );
+        if ( n < 0 ) { close( fd ); return 0; }
+        w += (unsigned int) n;
+    }
+    fchmod( fd, mode );
+    close( fd );
+    return 1;
+}
+
+// Read a whole file with POSIX into a CxBuffer. Empty buffer on failure.
+static CxBuffer
+readRaw( const char *path )
+{
+    struct stat st;
+    if ( stat( path, &st ) != 0 ) return CxBuffer();
+    int fd = open( path, O_RDONLY );
+    if ( fd < 0 ) return CxBuffer();
+    unsigned int size = (unsigned int) st.st_size;
+    unsigned char *buf = (unsigned char*) malloc( size > 0 ? size : 1 );
+    unsigned int got = 0;
+    while ( got < size ) {
+        int n = read( fd, buf + got, size - got );
+        if ( n <= 0 ) break;
+        got += (unsigned int) n;
+    }
+    close( fd );
+    CxBuffer out( buf, got );
+    free( buf );
+    return out;
+}
+
+static int
+modeOf( const char *path )
+{
+    struct stat st;
+    if ( stat( path, &st ) != 0 ) return -1;
+    return (int) ( st.st_mode & 07777 );
+}
+
+static int
+buffersEqual( CxBuffer b, const void *data, unsigned int len )
+{
+    if ( b.length() != len ) return 0;
+    if ( len == 0 ) return 1;
+    return memcmp( b.data(), data, len ) == 0;
+}
+
 
 //-----------------------------------------------------------------------------------------
 // tests
@@ -161,7 +251,7 @@ static void
 testPlannedVerb( void )
 {
     printf( "\n== planned-but-unimplemented verb ==\n" );
-    CxString resp = heliosDispatch( CxString( "{ \"verb\": \"read_file\", \"id\": 3 }" ) );
+    CxString resp = heliosDispatch( CxString( "{ \"verb\": \"list_dir\", \"id\": 3 }" ) );
     CxJSONObject *o = parseObject( resp );
     check( o != (CxJSONObject*)0, "planned-verb response parses" );
     if ( o == (CxJSONObject*)0 ) return;
@@ -330,6 +420,168 @@ testShutdown( void )
 }
 
 
+static void
+testReadFile( void )
+{
+    printf( "\n== read_file ==\n" );
+
+    const char *path = "/tmp/helios_test_read.bin";
+    unsigned char payload[] = { 'H', 'e', 'l', 'l', 'o', 0x00, 0xFF, 0x41, '\n' };
+    unsigned int plen = (unsigned int) sizeof( payload );
+
+    check( writeRaw( path, payload, plen, 0644 ), "read_file: fixture created" );
+
+    CxString req = CxString( "{ \"verb\":\"read_file\", \"id\":20, \"path\":\"" )
+                 + CxString( path ) + CxString( "\" }" );
+    CxJSONObject *o = parseObject( heliosDispatch( req ) );
+    check( o != (CxJSONObject*)0, "read_file response parses" );
+    if ( o != (CxJSONObject*)0 ) {
+        check( getBool( o, "ok", 0 ) == 1, "read_file ok==true" );
+        check( getNumber( o, "id", -1 ) == 20, "read_file echoes id" );
+        CxJSONObject *r = getObject( o, "result" );
+        check( r != (CxJSONObject*)0, "read_file has result" );
+        if ( r != (CxJSONObject*)0 ) {
+            check( getNumber( r, "size", -1 ) == (double) plen, "read_file: size matches" );
+            check( getString( r, "encoding" ) == CxString( "base64" ), "read_file: encoding base64" );
+            check( getNumber( r, "mode", -1 ) == 0644, "read_file: mode reported" );
+            CxBuffer got = b64DecodeT( getString( r, "content" ) );
+            check( buffersEqual( got, payload, plen ), "read_file: content byte-exact (NUL + high byte)" );
+        }
+        delete o;
+    }
+    unlink( path );
+
+    // nonexistent path
+    {
+        CxJSONObject *e = parseObject( heliosDispatch(
+            CxString( "{ \"verb\":\"read_file\", \"id\":21, \"path\":\"/tmp/helios_nope_xyz\" }" ) ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "read_file missing file ok==false" );
+            delete e;
+        }
+    }
+
+    // directory is not a regular file
+    {
+        CxJSONObject *e = parseObject( heliosDispatch(
+            CxString( "{ \"verb\":\"read_file\", \"id\":22, \"path\":\"/tmp\" }" ) ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "read_file on dir ok==false" );
+            check( contains( getString( e, "error" ), "regular file" ), "read_file dir error says regular file" );
+            delete e;
+        }
+    }
+
+    // missing path field
+    {
+        CxJSONObject *e = parseObject( heliosDispatch(
+            CxString( "{ \"verb\":\"read_file\", \"id\":23 }" ) ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "read_file missing path ok==false" );
+            delete e;
+        }
+    }
+}
+
+
+static void
+testWriteFile( void )
+{
+    printf( "\n== write_file ==\n" );
+
+    const char *path = "/tmp/helios_test_write.bin";
+    unlink( path );
+
+    unsigned char payload[] = { 'W', 'r', 0x00, 0xFE, 'i', 't', 'e', '\n' };
+    unsigned int plen = (unsigned int) sizeof( payload );
+    CxString b64 = b64EncodeT( payload, plen );
+
+    // new file with explicit mode 0640
+    CxString req = CxString( "{ \"verb\":\"write_file\", \"id\":30, \"path\":\"" ) + CxString( path )
+                 + CxString( "\", \"content\":\"" ) + b64
+                 + CxString( "\", \"mode\":" ) + CxString( (int) 0640 ) + CxString( " }" );
+    CxJSONObject *o = parseObject( heliosDispatch( req ) );
+    check( o != (CxJSONObject*)0, "write_file response parses" );
+    if ( o != (CxJSONObject*)0 ) {
+        check( getBool( o, "ok", 0 ) == 1, "write_file ok==true" );
+        CxJSONObject *r = getObject( o, "result" );
+        check( r != (CxJSONObject*)0, "write_file has result" );
+        if ( r != (CxJSONObject*)0 ) {
+            check( getBool( r, "created", 0 ) == 1, "write_file: created true for new file" );
+            check( getNumber( r, "bytes_written", -1 ) == (double) plen, "write_file: bytes_written matches" );
+            check( getNumber( r, "mode", -1 ) == 0640, "write_file: mode reported 0640" );
+        }
+        delete o;
+    }
+    check( buffersEqual( readRaw( path ), payload, plen ), "write_file: on-disk content byte-exact" );
+    check( modeOf( path ) == 0640, "write_file: on-disk mode 0640" );
+
+    // overwrite WITHOUT mode: content changes, perms preserved
+    unsigned char payload2[] = { 'v', '2', 0x00, '!' };
+    unsigned int plen2 = (unsigned int) sizeof( payload2 );
+    CxString req2 = CxString( "{ \"verb\":\"write_file\", \"id\":31, \"path\":\"" ) + CxString( path )
+                  + CxString( "\", \"content\":\"" ) + b64EncodeT( payload2, plen2 ) + CxString( "\" }" );
+    CxJSONObject *o2 = parseObject( heliosDispatch( req2 ) );
+    if ( o2 != (CxJSONObject*)0 ) {
+        CxJSONObject *r2 = getObject( o2, "result" );
+        check( r2 != (CxJSONObject*)0 && getBool( r2, "created", 1 ) == 0, "write_file: created false on overwrite" );
+        delete o2;
+    }
+    check( buffersEqual( readRaw( path ), payload2, plen2 ), "write_file: overwrite content byte-exact" );
+    check( modeOf( path ) == 0640, "write_file: mode PRESERVED on overwrite (still 0640)" );
+    unlink( path );
+
+    // new file, no mode: default 0644
+    const char *path2 = "/tmp/helios_test_write_default.bin";
+    unlink( path2 );
+    CxString req3 = CxString( "{ \"verb\":\"write_file\", \"id\":32, \"path\":\"" ) + CxString( path2 )
+                  + CxString( "\", \"content\":\"" ) + b64EncodeT( "hi", 2 ) + CxString( "\" }" );
+    heliosDispatch( req3 );
+    check( modeOf( path2 ) == 0644, "write_file: new-file default mode 0644" );
+    unlink( path2 );
+
+    // write -> read round-trip is byte-exact (all-bytes payload)
+    {
+        const char *rt = "/tmp/helios_test_roundtrip.bin";
+        unlink( rt );
+        unsigned char rp[] = { 0x00, 0x01, 0x02, 0xFD, 0xFE, 0xFF, 'A', 'B' };
+        unsigned int rl = (unsigned int) sizeof( rp );
+        CxString wreq = CxString( "{ \"verb\":\"write_file\", \"id\":33, \"path\":\"" ) + CxString( rt )
+                      + CxString( "\", \"content\":\"" ) + b64EncodeT( rp, rl ) + CxString( "\" }" );
+        heliosDispatch( wreq );
+        CxString rreq = CxString( "{ \"verb\":\"read_file\", \"id\":34, \"path\":\"" ) + CxString( rt ) + CxString( "\" }" );
+        CxJSONObject *ro = parseObject( heliosDispatch( rreq ) );
+        if ( ro != (CxJSONObject*)0 ) {
+            CxJSONObject *rr = getObject( ro, "result" );
+            check( rr != (CxJSONObject*)0 && buffersEqual( b64DecodeT( getString( rr, "content" ) ), rp, rl ),
+                   "write->read round-trip byte-exact" );
+            delete ro;
+        }
+        unlink( rt );
+    }
+
+    // missing path
+    {
+        CxJSONObject *e = parseObject( heliosDispatch(
+            CxString( "{ \"verb\":\"write_file\", \"id\":35, \"content\":\"aGk=\" }" ) ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "write_file missing path ok==false" );
+            delete e;
+        }
+    }
+
+    // missing content
+    {
+        CxJSONObject *e = parseObject( heliosDispatch(
+            CxString( "{ \"verb\":\"write_file\", \"id\":36, \"path\":\"/tmp/helios_x\" }" ) ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "write_file missing content ok==false" );
+            delete e;
+        }
+    }
+}
+
+
 //-----------------------------------------------------------------------------------------
 // main
 //-----------------------------------------------------------------------------------------
@@ -352,6 +604,8 @@ main( int argc, char **argv )
     testDefaultId();
     testResponseEscaping();
     testRunCommand();
+    testReadFile();
+    testWriteFile();
     testShutdown();
 
     printf( "\n======================\n" );

@@ -41,9 +41,7 @@ errorResponse( double id, CxString message )
 static int
 isPlannedVerb( CxString verb )
 {
-    return verb == "read_file"
-        || verb == "write_file"
-        || verb == "list_dir"
+    return verb == "list_dir"
         || verb == "stat"
         || verb == "search";
 }
@@ -94,6 +92,10 @@ heliosDispatch( CxString requestLine )
         out = verbShutdown( id );
     } else if ( verb == "run_command" ) {
         out = verbRun( id, req );
+    } else if ( verb == "read_file" ) {
+        out = verbReadFile( id, req );
+    } else if ( verb == "write_file" ) {
+        out = verbWriteFile( id, req );
     } else if ( isPlannedVerb( verb ) ) {
         out = errorResponse( id, CxString( "not implemented yet: " ) + verb );
     } else {
