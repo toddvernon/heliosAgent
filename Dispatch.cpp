@@ -41,8 +41,7 @@ errorResponse( double id, CxString message )
 static int
 isPlannedVerb( CxString verb )
 {
-    return verb == "shutdown"
-        || verb == "run_command"
+    return verb == "run_command"
         || verb == "read_file"
         || verb == "write_file"
         || verb == "list_dir"
@@ -92,6 +91,8 @@ heliosDispatch( CxString requestLine )
     CxString out;
     if ( verb == "hello" ) {
         out = verbHello( id );
+    } else if ( verb == "shutdown" ) {
+        out = verbShutdown( id );
     } else if ( isPlannedVerb( verb ) ) {
         out = errorResponse( id, CxString( "not implemented yet: " ) + verb );
     } else {

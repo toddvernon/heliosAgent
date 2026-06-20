@@ -21,6 +21,7 @@
 #include <cx/json/json_boolean.h>
 
 #include "Dispatch.h"
+#include "Verbs.h"
 
 // Verbs.cpp expects this symbol (normally defined in HeliosAgent.cpp's main
 // module, which we don't link into the test). Provide it here.
@@ -227,6 +228,35 @@ testResponseEscaping( void )
 }
 
 
+static void
+testShutdown( void )
+{
+    printf( "\n== shutdown (ACK + intent flag, no real exec) ==\n" );
+
+    // Nothing should have requested shutdown before this test runs.
+    check( heliosShutdownRequested() == 0, "shutdown not requested initially" );
+
+    CxString resp = heliosDispatch( CxString( "{ \"verb\": \"shutdown\", \"id\": 5 }" ) );
+    CxJSONObject *o = parseObject( resp );
+    check( o != (CxJSONObject*)0, "shutdown response parses" );
+    if ( o == (CxJSONObject*)0 ) return;
+
+    check( getBool( o, "ok", 0 ) == 1, "shutdown ok==true" );
+    check( getNumber( o, "id", -1 ) == 5, "shutdown echoes id" );
+    CxJSONObject *result = getObject( o, "result" );
+    check( result != (CxJSONObject*)0, "shutdown has result object" );
+    if ( result != (CxJSONObject*)0 ) {
+        check( contains( getString( result, "status" ), "shutting down" ), "result.status says shutting down" );
+    }
+
+    // Dispatching the verb records intent but execs NOTHING (the server, not the
+    // verb, runs the real command -- and only this test, not the server, ran).
+    check( heliosShutdownRequested() == 1, "shutdown intent recorded after dispatch" );
+
+    delete o;
+}
+
+
 //-----------------------------------------------------------------------------------------
 // main
 //-----------------------------------------------------------------------------------------
@@ -248,6 +278,7 @@ main( int argc, char **argv )
     testBadJson();
     testDefaultId();
     testResponseEscaping();
+    testShutdown();
 
     printf( "\n======================\n" );
     printf( "Results: %d passed, %d failed\n", testsPassed, testsFailed );

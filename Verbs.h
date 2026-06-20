@@ -17,4 +17,15 @@
 // Liveness handshake: agent name, version, protocol, hostname, daemon uptime.
 CxString verbHello( double id );
 
+// Graceful shutdown. Returns an ACK ({status:"shutting down"}) and records the
+// intent; it does NOT exec anything itself, so dispatching it (e.g. from a unit
+// test) is side-effect-free. The server performs the real shutdown only after
+// the ACK has been sent -- see heliosShutdownRequested() + HeliosAgent.cpp.
+CxString verbShutdown( double id );
+
+// True once verbShutdown has been dispatched on this (forked) connection. The
+// server checks this after sending the response and then execs the shutdown
+// command. Kept out of the verb so tests never trigger a real shutdown.
+int heliosShutdownRequested( void );
+
 #endif

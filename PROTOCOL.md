@@ -47,7 +47,13 @@ Ranked by priority (control holes first). Implemented verbs are marked.
   - request: `{ "verb": "hello", "id": 1 }`
   - result: `{ "agent":"heliosAgent", "version":"0.1.0", "protocol":1,
               "host":"<hostname>", "uptime":<seconds the daemon has run> }`
-- `shutdown` -- graceful `init 5`. [planned]
+- `shutdown` -- graceful shutdown (`init 5`). **[implemented]**
+  - request: `{ "verb": "shutdown", "id": 2 }`
+  - result: `{ "status": "shutting down" }`
+  - The agent ACKs first, then the server runs the shutdown command, so the
+    client always learns the guest is going down before it does. The command is
+    `/usr/sbin/init 5`, overridable via the `HELIOS_SHUTDOWN_CMD` env var (used
+    in dev so the default doesn't shut down the developer's Mac).
 - `run_command` -- fork/exec, returns stdout/stderr/exit code. [planned; needs
   the cx CxProcess timeout/cwd extension, HELIOS_PLAN.md A3]
 - `read_file` / `write_file` -- base64 content. [planned]

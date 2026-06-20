@@ -26,6 +26,18 @@
 // Daemon start time, set in main() (HeliosAgent.cpp), read here for uptime.
 extern time_t g_heliosStartTime;
 
+// Per-connection shutdown intent. verbShutdown sets it; the server reads it via
+// heliosShutdownRequested() after sending the ACK, then execs the real command.
+// A static (not a global) so the unit test, which links Verbs.cpp but never runs
+// the server loop, can dispatch shutdown safely without anything executing.
+static int s_shutdownRequested = 0;
+
+int
+heliosShutdownRequested( void )
+{
+    return s_shutdownRequested;
+}
+
 
 //-------------------------------------------------------------------------
 // verbHello
@@ -52,6 +64,33 @@ verbHello( double id )
     result->append( new CxJSONMember( "protocol", new CxJSONNumber( (double) HELIOS_PROTOCOL_VERSION ) ) );
     result->append( new CxJSONMember( "host",     new CxJSONString( CxString( hostbuf ) ) ) );
     result->append( new CxJSONMember( "uptime",   new CxJSONNumber( (double) uptime ) ) );
+
+    CxJSONObject resp;
+    resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );
+    resp.append( new CxJSONMember( "ok",     new CxJSONBoolean( 1 ) ) );
+    resp.append( new CxJSONMember( "result", result ) );
+
+    return resp.toJsonString();
+}
+
+
+//-------------------------------------------------------------------------
+// verbShutdown
+//
+// Record the intent and ACK. The actual `init 5` is run by the server after
+// this response is on the wire (HeliosAgent.cpp), so a guest shutting itself
+// down still tells the client first -- and dispatching this verb in isolation
+// (a test) executes nothing.
+//
+// { "id":<id>, "ok":true, "result":{ "status":"shutting down" } }
+//-------------------------------------------------------------------------
+CxString
+verbShutdown( double id )
+{
+    s_shutdownRequested = 1;
+
+    CxJSONObject *result = new CxJSONObject();
+    result->append( new CxJSONMember( "status", new CxJSONString( CxString( "shutting down" ) ) ) );
 
     CxJSONObject resp;
     resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );

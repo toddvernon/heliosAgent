@@ -27,6 +27,7 @@
 #include <cx/net/inaddr.h>
 
 #include "Dispatch.h"
+#include "Verbs.h"
 #include "HeliosVersion.h"
 
 // Provisional default listen port. The Mac side reaches this through a slirp
@@ -57,6 +58,27 @@ reapChildren( int signo )
     signal( SIGCHLD, reapChildren );
     errno = savedErrno;
     (void) signo;
+}
+
+
+//-------------------------------------------------------------------------
+// performShutdown
+//
+// Run the real shutdown command. Called by the server AFTER the shutdown ACK
+// has been sent, so the client always learns the guest is going down before it
+// does. The command is overridable via HELIOS_SHUTDOWN_CMD -- essential for dev
+// on the Mac, where the default `init 5` would shut down the developer's
+// machine. In the shipped guest it is left unset and defaults to init 5.
+//-------------------------------------------------------------------------
+static void
+performShutdown( void )
+{
+    const char *cmd = getenv( "HELIOS_SHUTDOWN_CMD" );
+    if ( cmd == (const char*)0 || cmd[0] == '\0' ) {
+        cmd = "/usr/sbin/init 5";
+    }
+    fprintf( stderr, "heliosAgent: shutdown requested; running: %s\n", cmd );
+    system( cmd );
 }
 
 
@@ -104,9 +126,22 @@ handleConnection( CxSocket conn )
         } catch ( ... ) {
             break;                               // peer went away mid-write
         }
+
+        // The ACK is now on the wire; stop serving this connection so the
+        // server can bring the system down.
+        if ( heliosShutdownRequested() ) {
+            break;
+        }
     }
 
     conn.close();
+
+    // Run the real shutdown only after the response is sent (or the peer left).
+    // The intent was set during dispatch, so it's honored even if the ACK send
+    // failed. In a unit test this code path never runs (no server loop).
+    if ( heliosShutdownRequested() ) {
+        performShutdown();
+    }
 }
 
 
