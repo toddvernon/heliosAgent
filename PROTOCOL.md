@@ -87,11 +87,35 @@ Ranked by priority (control holes first). Implemented verbs are marked.
     configs; else a new file defaults to 0644. mtime is deliberately **not**
     preserved (a write stamps it to now so `make` rebuilds). Missing/invalid
     `path` or `content`, or a non-regular existing target, is `ok:false`.
-- `list_dir` / `stat` -- directory listing + file metadata. [planned]
-- `search` -- grep/find on the Sun. [planned]
+- `stat` -- metadata for one path. **[implemented]**
+  - request: `{ "verb":"stat", "id":40, "path":"/etc/passwd" }`
+  - result: `{ path, type, size, mode, uid, gid, mtime[, target] }`
+  - Uses `lstat`, so a symlink reports `type:"symlink"` and a `target` field
+    rather than its destination. type is one of file/dir/symlink/fifo/chardev/
+    blockdev/socket/other. ok:false if the path can't be stat'd.
+- `list_dir` -- list a directory. **[implemented]**
+  - request: `{ "verb":"list_dir", "id":50, "path":"/etc" }`
+  - result: `{ path, count, entries:[ { name, type, size, mode, mtime }, ... ] }`
+  - Excludes "." and ".."; each entry is `lstat`'d. ok:false if the path isn't
+    a readable directory.
+- `search` -- grep file contents on the guest. **[implemented]**
+  - request: `{ "verb":"search", "id":60, "pattern":"TODO", "path":"src",
+              "ignore_case":false, "max":1000, "timeout_ms":0 }`
+    (`path` default ".", `max` default 1000; both `ignore_case` and `timeout_ms`
+    optional)
+  - result: `{ pattern, path, count, truncated, exit_code, timed_out,
+              matches:[ { file, line, text }, ... ] }`
+  - Shells native grep (`grep -rHn`, run where the files are), shell-quoting
+    the pattern and path so metacharacters can't inject, and discarding grep's
+    stderr so error text is never mis-parsed as a match. No-match (grep exit 1)
+    is `ok:true` with `count:0`; only a missing `pattern` is `ok:false`.
+    `truncated:true` means `max` was hit (matches are not silently dropped).
+    NB: needs a grep that supports `-rHn -e` -- on Solaris that means GNU or
+    xpg4 grep (see HELIOS_PLAN.md A4), not stock `/usr/bin/grep`.
 
-Known-but-unimplemented verbs return "not implemented yet"; unrecognized verbs
-return "unknown verb".
+All eight v1 verbs are implemented. Unrecognized verbs return "unknown verb";
+malformed requests return a protocol error. Both are `ok:false`, never a
+dropped connection.
 
 ## Example
 

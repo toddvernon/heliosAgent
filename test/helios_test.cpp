@@ -27,6 +27,7 @@
 #include <cx/json/json_string.h>
 #include <cx/json/json_number.h>
 #include <cx/json/json_boolean.h>
+#include <cx/json/json_array.h>
 
 #include "Dispatch.h"
 #include "Verbs.h"
@@ -114,6 +115,43 @@ getObject( CxJSONObject *o, const char *key )
         return (CxJSONObject*)0;
     }
     return (CxJSONObject*) m->object();
+}
+
+static CxJSONArray *
+getArray( CxJSONObject *o, const char *key )
+{
+    CxJSONMember *m = o->find( key );
+    if ( m == (CxJSONMember*)0 || m->object() == (CxJSONBase*)0
+         || m->object()->type() != CxJSONBase::ARRAY ) {
+        return (CxJSONArray*)0;
+    }
+    return (CxJSONArray*) m->object();
+}
+
+// Does an array of objects contain one whose string member `key` equals `val`?
+static int
+arrayHasObjectWith( CxJSONArray *a, const char *key, const char *val )
+{
+    if ( a == (CxJSONArray*)0 ) return 0;
+    for ( int i = 0; i < a->entries(); i++ ) {
+        CxJSONBase *b = a->at( i );
+        if ( b == (CxJSONBase*)0 || b->type() != CxJSONBase::OBJECT ) continue;
+        if ( getString( (CxJSONObject*) b, key ) == CxString( val ) ) return 1;
+    }
+    return 0;
+}
+
+// Find the object in an array whose string member `key` equals `val` (or NULL).
+static CxJSONObject *
+arrayFindObjectWith( CxJSONArray *a, const char *key, const char *val )
+{
+    if ( a == (CxJSONArray*)0 ) return (CxJSONObject*)0;
+    for ( int i = 0; i < a->entries(); i++ ) {
+        CxJSONBase *b = a->at( i );
+        if ( b == (CxJSONBase*)0 || b->type() != CxJSONBase::OBJECT ) continue;
+        if ( getString( (CxJSONObject*) b, key ) == CxString( val ) ) return (CxJSONObject*) b;
+    }
+    return (CxJSONObject*)0;
 }
 
 static int
@@ -204,6 +242,13 @@ buffersEqual( CxBuffer b, const void *data, unsigned int len )
     return memcmp( b.data(), data, len ) == 0;
 }
 
+// Fixture-setup shell (test-only; not the daemon's exec path).
+static void
+shellRun( CxString cmd )
+{
+    system( cmd.data() );
+}
+
 
 //-----------------------------------------------------------------------------------------
 // tests
@@ -244,19 +289,6 @@ testUnknownVerb( void )
     check( getBool( o, "ok", 1 ) == 0, "unknown verb ok==false" );
     check( getNumber( o, "id", -1 ) == 2, "unknown verb echoes id" );
     check( contains( getString( o, "error" ), "unknown verb" ), "error names unknown verb" );
-    delete o;
-}
-
-static void
-testPlannedVerb( void )
-{
-    printf( "\n== planned-but-unimplemented verb ==\n" );
-    CxString resp = heliosDispatch( CxString( "{ \"verb\": \"list_dir\", \"id\": 3 }" ) );
-    CxJSONObject *o = parseObject( resp );
-    check( o != (CxJSONObject*)0, "planned-verb response parses" );
-    if ( o == (CxJSONObject*)0 ) return;
-    check( getBool( o, "ok", 1 ) == 0, "planned verb ok==false" );
-    check( contains( getString( o, "error" ), "not implemented" ), "error says not implemented" );
     delete o;
 }
 
@@ -582,6 +614,203 @@ testWriteFile( void )
 }
 
 
+static void
+testStat( void )
+{
+    printf( "\n== stat ==\n" );
+
+    const char *path = "/tmp/helios_test_stat.bin";
+    unsigned char payload[] = { 'a', 'b', 'c', 'd', 'e' };
+    unsigned int plen = (unsigned int) sizeof( payload );
+    check( writeRaw( path, payload, plen, 0644 ), "stat: fixture created" );
+
+    CxString req = CxString( "{ \"verb\":\"stat\", \"id\":40, \"path\":\"" ) + CxString( path ) + CxString( "\" }" );
+    CxJSONObject *o = parseObject( heliosDispatch( req ) );
+    check( o != (CxJSONObject*)0, "stat response parses" );
+    if ( o != (CxJSONObject*)0 ) {
+        check( getBool( o, "ok", 0 ) == 1, "stat ok==true" );
+        CxJSONObject *r = getObject( o, "result" );
+        check( r != (CxJSONObject*)0, "stat has result" );
+        if ( r != (CxJSONObject*)0 ) {
+            check( getString( r, "type" ) == CxString( "file" ), "stat: type file" );
+            check( getNumber( r, "size", -1 ) == (double) plen, "stat: size matches" );
+            check( getNumber( r, "mode", -1 ) == 0644, "stat: mode 0644" );
+            check( getNumber( r, "mtime", -1 ) > 0, "stat: mtime present" );
+            check( getNumber( r, "uid", -1 ) >= 0, "stat: uid present" );
+        }
+        delete o;
+    }
+    unlink( path );
+
+    // a real directory reports type dir (NB: /tmp on macOS is itself a symlink,
+    // so use a dir we make -- lstat is truthful about symlinks, see below)
+    {
+        const char *d = "/tmp/helios_test_statdir";
+        rmdir( d );
+        mkdir( d, 0755 );
+        CxString rq = CxString( "{ \"verb\":\"stat\", \"id\":41, \"path\":\"" ) + CxString( d ) + CxString( "\" }" );
+        CxJSONObject *e = parseObject( heliosDispatch( rq ) );
+        if ( e != (CxJSONObject*)0 ) {
+            CxJSONObject *r = getObject( e, "result" );
+            check( r != (CxJSONObject*)0 && getString( r, "type" ) == CxString( "dir" ), "stat dir: type dir" );
+            delete e;
+        }
+        rmdir( d );
+    }
+
+    // a symlink reports type symlink and its target (lstat, not stat)
+    {
+        const char *tgt = "/tmp/helios_test_stat_target";
+        const char *lnk = "/tmp/helios_test_stat_link";
+        writeRaw( tgt, "x", 1, 0644 );
+        unlink( lnk );
+        check( symlink( tgt, lnk ) == 0, "stat: symlink fixture created" );
+        CxString rq = CxString( "{ \"verb\":\"stat\", \"id\":43, \"path\":\"" ) + CxString( lnk ) + CxString( "\" }" );
+        CxJSONObject *e = parseObject( heliosDispatch( rq ) );
+        if ( e != (CxJSONObject*)0 ) {
+            CxJSONObject *r = getObject( e, "result" );
+            check( r != (CxJSONObject*)0 && getString( r, "type" ) == CxString( "symlink" ), "stat: type symlink" );
+            check( r != (CxJSONObject*)0 && getString( r, "target" ) == CxString( tgt ), "stat: symlink target reported" );
+            delete e;
+        }
+        unlink( lnk );
+        unlink( tgt );
+    }
+
+    // nonexistent -> ok:false
+    {
+        CxJSONObject *e = parseObject( heliosDispatch(
+            CxString( "{ \"verb\":\"stat\", \"id\":42, \"path\":\"/tmp/helios_nope_stat\" }" ) ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "stat missing path ok==false" );
+            delete e;
+        }
+    }
+}
+
+
+static void
+testListDir( void )
+{
+    printf( "\n== list_dir ==\n" );
+
+    const char *dirp = "/tmp/helios_test_lsdir";
+    // clean any prior run, then build: two files + one subdir
+    {
+        CxString rm = CxString( "rm -rf " ) + CxString( dirp );
+        shellRun( rm );
+    }
+    check( mkdir( dirp, 0755 ) == 0, "list_dir: fixture dir created" );
+    writeRaw( "/tmp/helios_test_lsdir/alpha.txt", "a", 1, 0644 );
+    writeRaw( "/tmp/helios_test_lsdir/beta.txt",  "bb", 2, 0644 );
+    mkdir( "/tmp/helios_test_lsdir/sub", 0755 );
+
+    CxString req = CxString( "{ \"verb\":\"list_dir\", \"id\":50, \"path\":\"" ) + CxString( dirp ) + CxString( "\" }" );
+    CxJSONObject *o = parseObject( heliosDispatch( req ) );
+    check( o != (CxJSONObject*)0, "list_dir response parses" );
+    if ( o != (CxJSONObject*)0 ) {
+        check( getBool( o, "ok", 0 ) == 1, "list_dir ok==true" );
+        CxJSONObject *r = getObject( o, "result" );
+        check( r != (CxJSONObject*)0, "list_dir has result" );
+        if ( r != (CxJSONObject*)0 ) {
+            check( getNumber( r, "count", -1 ) == 3, "list_dir: count 3 (excludes . and ..)" );
+            CxJSONArray *ents = getArray( r, "entries" );
+            check( ents != (CxJSONArray*)0 && ents->entries() == 3, "list_dir: 3 entries" );
+            check( arrayHasObjectWith( ents, "name", "alpha.txt" ), "list_dir: has alpha.txt" );
+            check( arrayHasObjectWith( ents, "name", "beta.txt" ), "list_dir: has beta.txt" );
+            CxJSONObject *sub = arrayFindObjectWith( ents, "name", "sub" );
+            check( sub != (CxJSONObject*)0 && getString( sub, "type" ) == CxString( "dir" ), "list_dir: sub is type dir" );
+            CxJSONObject *al = arrayFindObjectWith( ents, "name", "alpha.txt" );
+            check( al != (CxJSONObject*)0 && getString( al, "type" ) == CxString( "file" ), "list_dir: alpha.txt is type file" );
+        }
+        delete o;
+    }
+
+    // a non-directory -> ok:false
+    {
+        CxJSONObject *e = parseObject( heliosDispatch(
+            CxString( "{ \"verb\":\"list_dir\", \"id\":51, \"path\":\"/tmp/helios_test_lsdir/alpha.txt\" }" ) ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "list_dir on a file ok==false" );
+            delete e;
+        }
+    }
+
+    // missing path -> ok:false
+    {
+        CxJSONObject *e = parseObject( heliosDispatch(
+            CxString( "{ \"verb\":\"list_dir\", \"id\":52 }" ) ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "list_dir missing path ok==false" );
+            delete e;
+        }
+    }
+
+    shellRun( CxString( "rm -rf " ) + CxString( dirp ) );
+}
+
+
+static void
+testSearch( void )
+{
+    printf( "\n== search ==\n" );
+
+    const char *dirp = "/tmp/helios_test_search";
+    shellRun( CxString( "rm -rf " ) + CxString( dirp ) );
+    mkdir( dirp, 0755 );
+    writeRaw( "/tmp/helios_test_search/a.txt", "apple\nbanana\ncherry\n", 20, 0644 );
+    writeRaw( "/tmp/helios_test_search/b.txt", "banana split\n", 13, 0644 );
+
+    CxString req = CxString( "{ \"verb\":\"search\", \"id\":60, \"pattern\":\"banana\", \"path\":\"" )
+                 + CxString( dirp ) + CxString( "\" }" );
+    CxJSONObject *o = parseObject( heliosDispatch( req ) );
+    check( o != (CxJSONObject*)0, "search response parses" );
+    if ( o != (CxJSONObject*)0 ) {
+        check( getBool( o, "ok", 0 ) == 1, "search ok==true" );
+        CxJSONObject *r = getObject( o, "result" );
+        check( r != (CxJSONObject*)0, "search has result" );
+        if ( r != (CxJSONObject*)0 ) {
+            check( getNumber( r, "count", -1 ) == 2, "search: 2 matches for banana" );
+            check( getBool( r, "truncated", 1 ) == 0, "search: not truncated" );
+            CxJSONArray *ms = getArray( r, "matches" );
+            check( ms != (CxJSONArray*)0 && ms->entries() == 2, "search: matches array has 2" );
+            if ( ms != (CxJSONArray*)0 && ms->entries() > 0 ) {
+                CxJSONObject *m0 = (CxJSONObject*) ms->at( 0 );
+                check( contains( getString( m0, "file" ), "txt" ), "search: match has file" );
+                check( getNumber( m0, "line", -1 ) > 0, "search: match has line number" );
+                check( contains( getString( m0, "text" ), "banana" ), "search: match text has banana" );
+            }
+        }
+        delete o;
+    }
+
+    // no matches -> ok:true, count 0
+    {
+        CxString req2 = CxString( "{ \"verb\":\"search\", \"id\":61, \"pattern\":\"zzznotfound\", \"path\":\"" )
+                      + CxString( dirp ) + CxString( "\" }" );
+        CxJSONObject *e = parseObject( heliosDispatch( req2 ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 0 ) == 1, "search no-match still ok==true" );
+            CxJSONObject *r = getObject( e, "result" );
+            check( r != (CxJSONObject*)0 && getNumber( r, "count", -1 ) == 0, "search no-match count 0" );
+            delete e;
+        }
+    }
+
+    // missing pattern -> ok:false
+    {
+        CxJSONObject *e = parseObject( heliosDispatch(
+            CxString( "{ \"verb\":\"search\", \"id\":62, \"path\":\"/tmp\" }" ) ) );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "search missing pattern ok==false" );
+            delete e;
+        }
+    }
+
+    shellRun( CxString( "rm -rf " ) + CxString( dirp ) );
+}
+
+
 //-----------------------------------------------------------------------------------------
 // main
 //-----------------------------------------------------------------------------------------
@@ -598,7 +827,6 @@ main( int argc, char **argv )
 
     testHello();
     testUnknownVerb();
-    testPlannedVerb();
     testMissingVerb();
     testBadJson();
     testDefaultId();
@@ -606,6 +834,9 @@ main( int argc, char **argv )
     testRunCommand();
     testReadFile();
     testWriteFile();
+    testStat();
+    testListDir();
+    testSearch();
     testShutdown();
 
     printf( "\n======================\n" );

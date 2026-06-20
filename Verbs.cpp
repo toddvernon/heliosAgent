@@ -20,6 +20,7 @@
 #include <cx/json/json_string.h>
 #include <cx/json/json_number.h>
 #include <cx/json/json_boolean.h>
+#include <cx/json/json_array.h>
 #include <cx/process/process.h>
 #include <cx/b64/b64.h>
 #include <cx/base/buffer.h>
@@ -31,6 +32,7 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -364,6 +366,299 @@ verbWriteFile( double id, CxJSONObject *req )
     result->append( new CxJSONMember( "bytes_written", new CxJSONNumber( (double) written ) ) );
     result->append( new CxJSONMember( "mode",          new CxJSONNumber( (double) finalMode ) ) );
     result->append( new CxJSONMember( "created",        new CxJSONBoolean( existed ? 0 : 1 ) ) );
+
+    CxJSONObject resp;
+    resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );
+    resp.append( new CxJSONMember( "ok",     new CxJSONBoolean( 1 ) ) );
+    resp.append( new CxJSONMember( "result", result ) );
+
+    return resp.toJsonString();
+}
+
+
+//-------------------------------------------------------------------------
+// fileType -- map st_mode to a stable type string (needs lstat to see
+// symlink/socket). Shared by verbStat and verbListDir.
+//-------------------------------------------------------------------------
+static const char *
+fileType( mode_t m )
+{
+    if ( S_ISREG( m ) )  return "file";
+    if ( S_ISDIR( m ) )  return "dir";
+    if ( S_ISLNK( m ) )  return "symlink";
+    if ( S_ISFIFO( m ) ) return "fifo";
+    if ( S_ISCHR( m ) )  return "chardev";
+    if ( S_ISBLK( m ) )  return "blockdev";
+    if ( S_ISSOCK( m ) ) return "socket";
+    return "other";
+}
+
+
+//-------------------------------------------------------------------------
+// shellQuote -- wrap a value in single quotes for /bin/sh, escaping embedded
+// single quotes as '\''. CxProcess runs via execl(/bin/sh,-c,...), so any
+// user value spliced into a command (verbSearch) must be quoted to block
+// shell interpretation/injection.
+//-------------------------------------------------------------------------
+static CxString
+shellQuote( CxString s )
+{
+    CxString out = CxString( "'" );
+    int n = s.length();
+    const char *d = s.data();
+    for ( int i = 0; i < n; i++ ) {
+        if ( d[i] == '\'' ) {
+            out = out + CxString( "'\\''" );
+        } else {
+            out += d[i];
+        }
+    }
+    out += '\'';
+    return out;
+}
+
+
+//-------------------------------------------------------------------------
+// verbStat
+//
+// { "id":<id>, "ok":true, "result":{ path, type, size, mode, uid, gid,
+//                                     mtime[, target] } }
+//-------------------------------------------------------------------------
+CxString
+verbStat( double id, CxJSONObject *req )
+{
+    CxJSONMember *pm = req->find( "path" );
+    if ( pm == (CxJSONMember*)0 || pm->object() == (CxJSONBase*)0
+         || pm->object()->type() != CxJSONBase::STRING ) {
+        return runError( id, CxString( "stat: missing or non-string 'path'" ) );
+    }
+    CxString path = ( (CxJSONString*) pm->object() )->get();
+
+    struct stat st;
+    if ( lstat( path.data(), &st ) != 0 ) {
+        return runError( id, CxString( "stat: " ) + CxString( strerror( errno ) ) + ": " + path );
+    }
+
+    CxJSONObject *result = new CxJSONObject();
+    result->append( new CxJSONMember( "path",  new CxJSONString( path ) ) );
+    result->append( new CxJSONMember( "type",  new CxJSONString( CxString( fileType( st.st_mode ) ) ) ) );
+    result->append( new CxJSONMember( "size",  new CxJSONNumber( (double) st.st_size ) ) );
+    result->append( new CxJSONMember( "mode",  new CxJSONNumber( (double) ( st.st_mode & 07777 ) ) ) );
+    result->append( new CxJSONMember( "uid",   new CxJSONNumber( (double) st.st_uid ) ) );
+    result->append( new CxJSONMember( "gid",   new CxJSONNumber( (double) st.st_gid ) ) );
+    result->append( new CxJSONMember( "mtime", new CxJSONNumber( (double) st.st_mtime ) ) );
+
+    if ( S_ISLNK( st.st_mode ) ) {
+        char linkbuf[ 1024 ];
+        int n = (int) readlink( path.data(), linkbuf, sizeof(linkbuf) - 1 );
+        if ( n >= 0 ) {
+            linkbuf[ n ] = '\0';
+            result->append( new CxJSONMember( "target", new CxJSONString( CxString( linkbuf ) ) ) );
+        }
+    }
+
+    CxJSONObject resp;
+    resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );
+    resp.append( new CxJSONMember( "ok",     new CxJSONBoolean( 1 ) ) );
+    resp.append( new CxJSONMember( "result", result ) );
+
+    return resp.toJsonString();
+}
+
+
+//-------------------------------------------------------------------------
+// verbListDir
+//
+// { "id":<id>, "ok":true, "result":{ path, count, entries:[ { name, type,
+//                                     size, mode, mtime }, ... ] } }
+//-------------------------------------------------------------------------
+CxString
+verbListDir( double id, CxJSONObject *req )
+{
+    CxJSONMember *pm = req->find( "path" );
+    if ( pm == (CxJSONMember*)0 || pm->object() == (CxJSONBase*)0
+         || pm->object()->type() != CxJSONBase::STRING ) {
+        return runError( id, CxString( "list_dir: missing or non-string 'path'" ) );
+    }
+    CxString path = ( (CxJSONString*) pm->object() )->get();
+
+    DIR *dir = opendir( path.data() );
+    if ( dir == (DIR*)0 ) {
+        return runError( id, CxString( "list_dir: " ) + CxString( strerror( errno ) ) + ": " + path );
+    }
+
+    // path prefix for per-entry lstat (one trailing slash, exactly)
+    CxString prefix = path;
+    if ( prefix.length() == 0 || prefix.data()[ prefix.length() - 1 ] != '/' ) {
+        prefix += '/';
+    }
+
+    CxJSONArray *entries = new CxJSONArray();
+    int count = 0;
+
+    struct dirent *de;
+    while ( ( de = readdir( dir ) ) != (struct dirent*)0 ) {
+        if ( strcmp( de->d_name, "." ) == 0 || strcmp( de->d_name, ".." ) == 0 ) {
+            continue;
+        }
+
+        CxString full = prefix + CxString( de->d_name );
+
+        CxJSONObject *e = new CxJSONObject();
+        e->append( new CxJSONMember( "name", new CxJSONString( CxString( de->d_name ) ) ) );
+
+        struct stat st;
+        if ( lstat( full.data(), &st ) == 0 ) {
+            e->append( new CxJSONMember( "type",  new CxJSONString( CxString( fileType( st.st_mode ) ) ) ) );
+            e->append( new CxJSONMember( "size",  new CxJSONNumber( (double) st.st_size ) ) );
+            e->append( new CxJSONMember( "mode",  new CxJSONNumber( (double) ( st.st_mode & 07777 ) ) ) );
+            e->append( new CxJSONMember( "mtime", new CxJSONNumber( (double) st.st_mtime ) ) );
+        } else {
+            e->append( new CxJSONMember( "type", new CxJSONString( CxString( "other" ) ) ) );
+        }
+
+        entries->append( e );
+        count++;
+    }
+    closedir( dir );
+
+    CxJSONObject *result = new CxJSONObject();
+    result->append( new CxJSONMember( "path",    new CxJSONString( path ) ) );
+    result->append( new CxJSONMember( "count",   new CxJSONNumber( (double) count ) ) );
+    result->append( new CxJSONMember( "entries", entries ) );
+
+    CxJSONObject resp;
+    resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );
+    resp.append( new CxJSONMember( "ok",     new CxJSONBoolean( 1 ) ) );
+    resp.append( new CxJSONMember( "result", result ) );
+
+    return resp.toJsonString();
+}
+
+
+//-------------------------------------------------------------------------
+// verbSearch
+//
+// Shell out to native grep ("run it where the files are"), parse file:line:text
+// into structured matches. Pattern/path are shell-quoted; grep's stderr is
+// discarded so error text can't be mis-parsed as a match.
+//
+// { "id":<id>, "ok":true, "result":{ pattern, path, count, truncated,
+//                                     exit_code, timed_out, matches:[...] } }
+//-------------------------------------------------------------------------
+CxString
+verbSearch( double id, CxJSONObject *req )
+{
+    // pattern (required string)
+    CxJSONMember *pm = req->find( "pattern" );
+    if ( pm == (CxJSONMember*)0 || pm->object() == (CxJSONBase*)0
+         || pm->object()->type() != CxJSONBase::STRING ) {
+        return runError( id, CxString( "search: missing or non-string 'pattern'" ) );
+    }
+    CxString pattern = ( (CxJSONString*) pm->object() )->get();
+
+    // path (optional string; default ".")
+    CxString path = CxString( "." );
+    CxJSONMember *pathm = req->find( "path" );
+    if ( pathm != (CxJSONMember*)0 && pathm->object() != (CxJSONBase*)0
+         && pathm->object()->type() == CxJSONBase::STRING ) {
+        CxString p = ( (CxJSONString*) pathm->object() )->get();
+        if ( p.length() > 0 ) {
+            path = p;
+        }
+    }
+
+    // ignore_case (optional bool)
+    int ignoreCase = 0;
+    CxJSONMember *icm = req->find( "ignore_case" );
+    if ( icm != (CxJSONMember*)0 && icm->object() != (CxJSONBase*)0
+         && icm->object()->type() == CxJSONBase::BOOLEAN ) {
+        ignoreCase = ( (CxJSONBoolean*) icm->object() )->get();
+    }
+
+    // max (optional number; default 1000)
+    int maxMatches = 1000;
+    CxJSONMember *mm = req->find( "max" );
+    if ( mm != (CxJSONMember*)0 && mm->object() != (CxJSONBase*)0
+         && mm->object()->type() == CxJSONBase::NUMBER ) {
+        maxMatches = (int) ( (CxJSONNumber*) mm->object() )->get();
+    }
+
+    // timeout_ms (optional number; absent/<=0 -> no timeout)
+    int timeout = 0;
+    CxJSONMember *tm = req->find( "timeout_ms" );
+    if ( tm != (CxJSONMember*)0 && tm->object() != (CxJSONBase*)0
+         && tm->object()->type() == CxJSONBase::NUMBER ) {
+        timeout = (int) ( (CxJSONNumber*) tm->object() )->get();
+    }
+
+    // grep -rHn: recursive, force filename, line numbers. -e guards a pattern
+    // starting with '-'; -- ends options before the path. stderr -> /dev/null.
+    CxString cmd = CxString( "grep -rHn" );
+    if ( ignoreCase ) {
+        cmd = cmd + CxString( " -i" );
+    }
+    cmd = cmd + CxString( " -e " ) + shellQuote( pattern )
+              + CxString( " -- " ) + shellQuote( path )
+              + CxString( " 2>/dev/null" );
+
+    CxProcess proc;
+    proc.run( cmd.data(), (const char*)0, timeout );
+    int rc = proc.getExitCode();
+    CxString out = proc.getOutput();
+
+    CxJSONArray *matches = new CxJSONArray();
+    int count = 0;
+    int truncated = 0;
+
+    // grep exit: 0 = matches, 1 = no matches, >=2 = error. Parse only on <=1.
+    if ( rc <= 1 ) {
+        const char *d = out.data();
+        int n = out.length();
+        int start = 0;
+        for ( int i = 0; i <= n && ! truncated; i++ ) {
+            if ( i == n || d[i] == '\n' ) {
+                int lineLen = i - start;
+                if ( lineLen > 0 ) {
+                    const char *L = d + start;
+                    int c1 = -1, c2 = -1, k;
+                    for ( k = 0; k < lineLen; k++ ) {
+                        if ( L[k] == ':' ) { c1 = k; break; }
+                    }
+                    if ( c1 >= 0 ) {
+                        for ( k = c1 + 1; k < lineLen; k++ ) {
+                            if ( L[k] == ':' ) { c2 = k; break; }
+                        }
+                    }
+                    if ( c1 >= 0 && c2 >= 0 ) {
+                        if ( count >= maxMatches ) {
+                            truncated = 1;
+                        } else {
+                            CxString file( L, c1 );
+                            CxString lineno( L + c1 + 1, c2 - ( c1 + 1 ) );
+                            CxString text( L + c2 + 1, lineLen - ( c2 + 1 ) );
+                            CxJSONObject *m = new CxJSONObject();
+                            m->append( new CxJSONMember( "file", new CxJSONString( file ) ) );
+                            m->append( new CxJSONMember( "line", new CxJSONNumber( (double) atoi( lineno.data() ) ) ) );
+                            m->append( new CxJSONMember( "text", new CxJSONString( text ) ) );
+                            matches->append( m );
+                            count++;
+                        }
+                    }
+                }
+                start = i + 1;
+            }
+        }
+    }
+
+    CxJSONObject *result = new CxJSONObject();
+    result->append( new CxJSONMember( "pattern",   new CxJSONString( pattern ) ) );
+    result->append( new CxJSONMember( "path",      new CxJSONString( path ) ) );
+    result->append( new CxJSONMember( "count",     new CxJSONNumber( (double) count ) ) );
+    result->append( new CxJSONMember( "truncated", new CxJSONBoolean( truncated ) ) );
+    result->append( new CxJSONMember( "exit_code", new CxJSONNumber( (double) rc ) ) );
+    result->append( new CxJSONMember( "timed_out", new CxJSONBoolean( proc.wasTimedOut() ) ) );
+    result->append( new CxJSONMember( "matches",   matches ) );
 
     CxJSONObject resp;
     resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );

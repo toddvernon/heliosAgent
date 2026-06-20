@@ -34,20 +34,6 @@ errorResponse( double id, CxString message )
 
 
 //-------------------------------------------------------------------------
-// isImplementedLater  -- a known verb whose handler hasn't landed yet, so we
-// return a clear "not implemented" rather than "unknown verb". Keeps the verb
-// surface visible to clients while the daemon grows.
-//-------------------------------------------------------------------------
-static int
-isPlannedVerb( CxString verb )
-{
-    return verb == "list_dir"
-        || verb == "stat"
-        || verb == "search";
-}
-
-
-//-------------------------------------------------------------------------
 // heliosDispatch
 //-------------------------------------------------------------------------
 CxString
@@ -96,8 +82,12 @@ heliosDispatch( CxString requestLine )
         out = verbReadFile( id, req );
     } else if ( verb == "write_file" ) {
         out = verbWriteFile( id, req );
-    } else if ( isPlannedVerb( verb ) ) {
-        out = errorResponse( id, CxString( "not implemented yet: " ) + verb );
+    } else if ( verb == "stat" ) {
+        out = verbStat( id, req );
+    } else if ( verb == "list_dir" ) {
+        out = verbListDir( id, req );
+    } else if ( verb == "search" ) {
+        out = verbSearch( id, req );
     } else {
         out = errorResponse( id, CxString( "unknown verb: " ) + verb );
     }

@@ -48,6 +48,27 @@ CxString verbReadFile( double id, CxJSONObject *req );
 // rebuilds. Result: { path, bytes_written, mode, created }.
 CxString verbWriteFile( double id, CxJSONObject *req );
 
+// Metadata for one path (lstat, so a symlink reports as a symlink rather than
+// its target). Reads "path" (required). Result: { path, type, size, mode, uid,
+// gid, mtime } and, for a symlink, "target". type is one of file/dir/symlink/
+// fifo/chardev/blockdev/socket/other. ok:false if the path can't be stat'd.
+CxString verbStat( double id, CxJSONObject *req );
+
+// List a directory's entries (excluding "." and ".."), each lstat'd. Reads
+// "path" (required). Result: { path, count, entries:[ { name, type, size,
+// mode, mtime }, ... ] }. ok:false if the path isn't a readable directory.
+CxString verbListDir( double id, CxJSONObject *req );
+
+// Search file contents on the guest by shelling native grep (run it where the
+// files are). Reads "pattern" (required), "path" (optional, default "."),
+// "ignore_case" (optional bool), "max" (optional cap, default 1000), and
+// "timeout_ms" (optional). Result: { pattern, path, count, truncated,
+// exit_code, timed_out, matches:[ { file, line, text }, ... ] }. The pattern
+// and path are shell-quoted and grep's stderr is discarded so error text never
+// pollutes parsed matches. ok:false only on a missing pattern. NB: needs a
+// grep that supports -rHn -e (GNU/xpg4 grep on Solaris; see HELIOS_PLAN A4).
+CxString verbSearch( double id, CxJSONObject *req );
+
 // Graceful shutdown. Returns an ACK ({status:"shutting down"}) and records the
 // intent; it does NOT exec anything itself, so dispatching it (e.g. from a unit
 // test) is side-effect-free. The server performs the real shutdown only after
