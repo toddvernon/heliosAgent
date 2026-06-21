@@ -15,8 +15,11 @@
 # Bourne-sh only (no bashisms): this has to run under Solaris 2.6 /bin/sh.
 
 # --- locations (keep LOG/PIDFILE in step with init/heliosAgent) ------------
-ARCH=`uname -s | tr '[A-Z]' '[a-z]'`_`uname -m | tr '[A-Z]' '[a-z]'`
-BIN="$ARCH/heliosAgent"
+# The makefile names its build dir <os>_<arch>, but ARCH comes out empty on the
+# Suns (known make-system quirk), so the dir lands as e.g. "sunos_". Glob for
+# the binary so deploy works whether or not the arch suffix is present.
+OS=`uname -s | tr '[A-Z]' '[a-z]'`
+BIN=`ls ${OS}_*/heliosAgent 2>/dev/null | head -1`
 BINDEST=/usr/local/bin/heliosAgent
 INITSRC=init/heliosAgent
 INITDEST=/etc/init.d/heliosAgent
