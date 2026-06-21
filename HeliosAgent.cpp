@@ -18,13 +18,17 @@
 #include <signal.h>
 #include <errno.h>
 #include <time.h>
+#include <stdarg.h>
+#include <fcntl.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cx/base/string.h>
 #include <cx/net/socket.h>
 #include <cx/net/inaddr.h>
+#include <cx/log/logfile.h>
 
 #include "Dispatch.h"
 #include "Verbs.h"
@@ -37,6 +41,110 @@
 
 // Daemon start time, for the hello verb's uptime field. Read by Verbs.cpp.
 time_t g_heliosStartTime = 0;
+
+// Logging. g_log is opened on a file only when -l is given; otherwise log lines
+// go to stderr (the dev default). CxLogFile flushes every line (ALWAYS_FLUSH)
+// and stamps each with pid + timestamp, so it survives the per-connection forks
+// and the children's _exit() with no lost or interleaved output.
+static CxLogFile g_log;
+static int       g_logOpen = 0;
+
+// Pidfile path (NULL unless -P given). Recorded so the SIGTERM handler and the
+// shutdown verb can remove it on the way out.
+static const char *g_pidPath = (const char*)0;
+
+
+//-------------------------------------------------------------------------
+// heliosLog -- one log line, to the file if open else stderr. Formats into a
+// buffer first so the single variadic call can route either way (CxLogFile's
+// printf is itself variadic and can't be forwarded a va_list).
+//-------------------------------------------------------------------------
+static void
+heliosLog( int isErr, const char *fmt, ... )
+{
+    char buf[ 2048 ];
+    va_list ap;
+    va_start( ap, fmt );
+    vsnprintf( buf, sizeof(buf), fmt, ap );
+    va_end( ap );
+    buf[ sizeof(buf) - 1 ] = '\0';
+
+    if ( g_logOpen ) {
+        if ( isErr ) {
+            g_log.printf( CXERR,  "%s", buf );
+        } else {
+            g_log.printf( CXINFO, "%s", buf );
+        }
+    } else {
+        fprintf( stderr, "heliosAgent: %s\n", buf );
+    }
+}
+
+
+//-------------------------------------------------------------------------
+// writePidFile -- record our pid so an init stop/K-script can find us.
+//-------------------------------------------------------------------------
+static int
+writePidFile( const char *path )
+{
+    FILE *f = fopen( path, "w" );
+    if ( f == (FILE*)0 ) {
+        return -1;
+    }
+    fprintf( f, "%ld\n", (long) getpid() );
+    fclose( f );
+    return 0;
+}
+
+
+//-------------------------------------------------------------------------
+// daemonize -- detach into the background as a well-behaved SVR4 daemon:
+// double-fork (so we can never reacquire a controlling terminal), new session,
+// chdir off any mount, sane umask, and stdio redirected to /dev/null. The
+// listening socket fd survives the forks. Returns 0 in the final daemon
+// process, -1 on failure. Note: the log uses its own fd (CxLogFile), so it
+// keeps working after stdio is sent to /dev/null.
+//-------------------------------------------------------------------------
+static int
+daemonize( void )
+{
+    pid_t pid = fork();
+    if ( pid < 0 ) return -1;
+    if ( pid > 0 ) _exit( 0 );          // original parent leaves
+
+    if ( setsid() < 0 ) return -1;      // new session, drop controlling tty
+
+    pid = fork();
+    if ( pid < 0 ) return -1;
+    if ( pid > 0 ) _exit( 0 );          // session leader leaves; grandchild runs
+
+    chdir( "/" );
+    umask( 022 );
+
+    int fd = open( "/dev/null", O_RDWR );
+    if ( fd >= 0 ) {
+        dup2( fd, 0 );
+        dup2( fd, 1 );
+        dup2( fd, 2 );
+        if ( fd > 2 ) close( fd );
+    }
+    return 0;
+}
+
+
+//-------------------------------------------------------------------------
+// termHandler -- clean stop on SIGTERM (what an init K-script sends): drop the
+// pidfile and exit. Only async-signal-safe calls here (no logging/printf).
+//-------------------------------------------------------------------------
+static void
+termHandler( int signo )
+{
+    if ( g_pidPath != (const char*)0 ) {
+        unlink( g_pidPath );
+    }
+    _exit( 0 );
+    (void) signo;
+}
 
 
 //-------------------------------------------------------------------------
@@ -77,7 +185,10 @@ performShutdown( void )
     if ( cmd == (const char*)0 || cmd[0] == '\0' ) {
         cmd = "/usr/sbin/init 5";
     }
-    fprintf( stderr, "heliosAgent: shutdown requested; running: %s\n", cmd );
+    heliosLog( 0, "shutdown requested; running: %s", cmd );
+    if ( g_pidPath != (const char*)0 ) {
+        unlink( g_pidPath );
+    }
     system( cmd );
 }
 
@@ -119,6 +230,13 @@ handleConnection( CxSocket conn )
         }
 
         CxString response = heliosDispatch( line );
+
+        // Operational log: the request (truncated so a write_file's base64 blob
+        // doesn't flood the log) and whether the daemon answered ok.
+        int wasOk = ( response.index( CxString( "\"ok\":true" ) ) != -1 );
+        heliosLog( wasOk ? 0 : 1, "req: %.140s -> %s",
+                   line.data(), wasOk ? "ok" : "ERROR" );
+
         response.append( '\n' );
 
         try {
@@ -153,19 +271,49 @@ main( int argc, char** argv )
 {
     g_heliosStartTime = time( (time_t*)0 );
 
-    int port = HELIOS_DEFAULT_PORT;
-    if ( argc > 1 ) {
-        port = atoi( argv[1] );
-        if ( port <= 0 ) {
-            fprintf( stderr, "usage: %s [port]\n", argv[0] );
-            return 1;
+    // Options. Defaults keep the dev workflow (foreground, log to stderr); the
+    // Solaris init script passes -d -l <logfile> -P <pidfile>.
+    int         port        = HELIOS_DEFAULT_PORT;
+    int         doDaemonize = 0;
+    const char *logPath     = (const char*)0;
+    const char *pidPath     = (const char*)0;
+
+    int c;
+    while ( ( c = getopt( argc, argv, "dp:l:P:" ) ) != -1 ) {
+        switch ( c ) {
+            case 'd': doDaemonize = 1;      break;
+            case 'p': port    = atoi( optarg ); break;
+            case 'l': logPath = optarg;     break;
+            case 'P': pidPath = optarg;     break;
+            default:
+                fprintf( stderr,
+                    "usage: %s [-d] [-p port] [-l logfile] [-P pidfile] [port]\n"
+                    "  -d            daemonize (detach; for init). default: foreground\n"
+                    "  -p port       listen port (default %d)\n"
+                    "  -l logfile    append log here (default: stderr)\n"
+                    "  -P pidfile    write pid here (for init stop/restart)\n",
+                    argv[0], HELIOS_DEFAULT_PORT );
+                return 1;
         }
+    }
+    // Back-compat: a bare positional port (the old `heliosAgent <port>` form).
+    if ( optind < argc ) {
+        int p = atoi( argv[ optind ] );
+        if ( p > 0 ) {
+            port = p;
+        }
+    }
+    if ( port <= 0 ) {
+        fprintf( stderr, "heliosAgent: invalid port\n" );
+        return 1;
     }
 
     // A client vanishing mid-write must not take the daemon down.
     signal( SIGPIPE, SIG_IGN );
     // Reap per-connection child processes so they don't zombie.
     signal( SIGCHLD, reapChildren );
+    // Clean stop on the signal an init K-script sends.
+    signal( SIGTERM, termHandler );
 
     CxSocket server( AF_INET, SOCK_STREAM, 0 );
     if ( ! server.good() ) {
@@ -173,23 +321,59 @@ main( int argc, char** argv )
         return 1;
     }
 
+    // Allow an immediate restart while a prior instance's port is in TIME_WAIT.
+    server.setReuseAddr( 1 );
+
     // Empty hostname binds INADDR_ANY, which is what we need inside the guest:
     // slirp forwards to the guest's address, not loopback. No auth yet --
     // localhost-only-via-hostfwd posture; see HELIOS_PLAN.md B7.
     CxInetAddress addr( port );
     addr.process();
 
-    if ( server.bind( addr ) != 0 ) {
-        fprintf( stderr, "heliosAgent: bind failed on port %d\n", port );
-        return 1;
-    }
-    if ( server.listen( 5 ) != 0 ) {
-        fprintf( stderr, "heliosAgent: listen failed on port %d\n", port );
+    // Bind + listen BEFORE daemonizing, while stderr is still attached, so a
+    // failure is visible to whoever started us (and yields a nonzero exit the
+    // init script can see) rather than vanishing into a detached process. cx's
+    // net layer reports bind/listen failure by THROWING CxSocketException, so
+    // catch it and exit cleanly instead of aborting on an uncaught exception.
+    try {
+        server.bind( addr );
+        server.listen( 5 );
+    } catch ( ... ) {
+        fprintf( stderr, "heliosAgent: bind/listen failed on port %d (in use?)\n", port );
         return 1;
     }
 
-    fprintf( stderr, "heliosAgent %s (protocol %d) listening on port %d\n",
-             HELIOS_VERSION, HELIOS_PROTOCOL_VERSION, port );
+    // Detach now (the listening socket survives the forks). After this point
+    // stderr is /dev/null, so all output must go through the logfile.
+    if ( doDaemonize ) {
+        if ( daemonize() != 0 ) {
+            fprintf( stderr, "heliosAgent: daemonize failed\n" );
+            return 1;
+        }
+    }
+
+    // Open the logfile in the final process (CxLogFile keeps its own fd, so it
+    // is unaffected by the /dev/null stdio redirect above). Append mode so
+    // restarts don't wipe history.
+    if ( logPath != (const char*)0 ) {
+        if ( g_log.open( CxString( logPath ), CxString( "a" ) ) ) {
+            g_logOpen = 1;
+        } else {
+            fprintf( stderr, "heliosAgent: could not open logfile %s\n", logPath );
+        }
+    }
+
+    // Record our pid for the init stop/restart path.
+    if ( pidPath != (const char*)0 ) {
+        g_pidPath = pidPath;
+        if ( writePidFile( pidPath ) != 0 ) {
+            heliosLog( 1, "could not write pidfile %s", pidPath );
+        }
+    }
+
+    heliosLog( 0, "heliosAgent %s (protocol %d) listening on port %d, pid %ld%s",
+               HELIOS_VERSION, HELIOS_PROTOCOL_VERSION, port, (long) getpid(),
+               doDaemonize ? " (daemon)" : "" );
 
     // Concurrency model: fork per connection. The parent does nothing but
     // accept and fork, so a slow or long-running request on one connection

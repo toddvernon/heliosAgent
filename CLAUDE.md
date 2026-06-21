@@ -20,10 +20,26 @@ The product context lives in the swift-x tree (`~/dev/X`): `Helios-Mission.md`
 ```bash
 make            # builds <uname_s>_<arch>/heliosAgent
 make clean
-./darwin_arm64/heliosAgent [port]   # default port 2125
+make test       # builds + runs the unit suite (test/)
+
+# Run (dev: foreground, log to stderr):
+./darwin_arm64/heliosAgent [-p port]        # default port 2125
+./darwin_arm64/heliosAgent 2125             # legacy positional port still works
+
+# Run (service: detach, log to file, write pidfile) -- what the init script does:
+./darwin_arm64/heliosAgent -d -p 2125 -l /var/log/heliosAgent.log -P /var/run/heliosAgent.pid
 ```
-Always run a full `make` after changes. Build output dirs are git-ignored and
-must not be committed or hand-edited.
+Flags: `-d` daemonize (double-fork/setsid/redirect stdio), `-p` port, `-l`
+append logfile (CxLogFile, pid+timestamp per line), `-P` pidfile. SIGTERM stops
+cleanly and removes the pidfile; the listening socket sets SO_REUSEADDR so a
+restart doesn't trip over TIME_WAIT.
+
+On the Sun, after `make`, run `./deploy.sh` as root: it installs the binary to
+`/usr/local/bin`, drops `init/heliosAgent` into `/etc/init.d`, wires the rc
+symlinks (S98 multiuser / K30 shutdown+single-user), and (re)starts the daemon.
+It's idempotent, so it's also the upgrade path (rebuild, re-run). Always run a
+full `make` after changes. Build output dirs are git-ignored and must not be
+committed or hand-edited.
 
 ## Non-negotiable constraints (same as cx and cm)
 - NO `std::`, NO STL, NO templates, NO new external dependencies. Use cx

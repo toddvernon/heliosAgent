@@ -1,0 +1,68 @@
+#!/bin/sh
+#
+# heliosAgent -- SysV init script for Solaris 2.6 (and SVR4 kin).
+#
+# Install on the guest as /etc/init.d/heliosAgent, then link it into the run
+# levels so it starts at boot and stops on shutdown (S = start, K = kill;
+# the two-digit number is the ordering):
+#
+#   cp heliosAgent /etc/init.d/heliosAgent
+#   chmod 755 /etc/init.d/heliosAgent
+#   ln -s ../init.d/heliosAgent /etc/rc2.d/S98heliosAgent
+#   ln -s ../init.d/heliosAgent /etc/rc0.d/K30heliosAgent
+#   ln -s ../init.d/heliosAgent /etc/rc1.d/K30heliosAgent
+#   ln -s ../init.d/heliosAgent /etc/rcS.d/K30heliosAgent
+#
+# (On the SPARCplug image this is done by the baseline config script; this file
+# is the reference / hand-install form. Same pattern as guest/sshd-init.sh.)
+#
+# The daemon double-forks (-d), logs to LOG, and records its pid in PIDFILE so
+# stop/restart/status can find it. Bind/listen failures exit nonzero with a
+# message before detaching, so a bad start is visible here.
+
+BIN=/usr/local/bin/heliosAgent
+PORT=2125
+LOG=/var/log/heliosAgent.log
+PIDFILE=/var/run/heliosAgent.pid
+
+case "$1" in
+start)
+	if [ ! -x "$BIN" ]; then
+		echo "heliosAgent: $BIN not found or not executable"
+		exit 1
+	fi
+	echo "Starting heliosAgent."
+	"$BIN" -d -p "$PORT" -l "$LOG" -P "$PIDFILE"
+	;;
+
+stop)
+	if [ -f "$PIDFILE" ]; then
+		PID=`cat "$PIDFILE"`
+		echo "Stopping heliosAgent (pid $PID)."
+		kill -TERM "$PID" 2>/dev/null
+	else
+		echo "heliosAgent: no pidfile, not running?"
+	fi
+	;;
+
+restart)
+	"$0" stop
+	sleep 1
+	"$0" start
+	;;
+
+status)
+	if [ -f "$PIDFILE" ] && kill -0 `cat "$PIDFILE"` 2>/dev/null; then
+		echo "heliosAgent running (pid `cat "$PIDFILE"`)."
+	else
+		echo "heliosAgent not running."
+	fi
+	;;
+
+*)
+	echo "Usage: $0 {start|stop|restart|status}"
+	exit 1
+	;;
+esac
+
+exit 0

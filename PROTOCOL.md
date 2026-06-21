@@ -124,7 +124,13 @@ dropped connection.
 
 ## Notes
 
-- Default listen port is 2125 (provisional; override with `heliosAgent <port>`).
-- Binds INADDR_ANY so it's reachable through slirp inside the guest. There is no
-  authentication yet -- the posture is localhost-only-via-hostfwd. Auth for the
-  bare-metal-Sun case is a documented later concern (HELIOS_PLAN.md B7).
+- Default listen port is 2125 (`-p` to change; a bare positional port still
+  works for back-compat).
+- Binds INADDR_ANY so it's reachable through slirp inside the guest, with
+  SO_REUSEADDR set so a restart doesn't trip over a port in TIME_WAIT. There is
+  no authentication yet -- the posture is localhost-only-via-hostfwd. Auth for
+  the bare-metal-Sun case is a documented later concern (HELIOS_PLAN.md B7).
+- Runs as a proper daemon for the guest: `-d` double-forks and detaches, `-l`
+  appends a timestamped/pid-stamped log (CxLogFile), `-P` writes a pidfile, and
+  SIGTERM stops cleanly (removes the pidfile). `init/heliosAgent` is the SVR4
+  init script. In dev it runs in the foreground logging to stderr.
