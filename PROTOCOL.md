@@ -56,15 +56,23 @@ Ranked by priority (control holes first). Implemented verbs are marked.
     in dev so the default doesn't shut down the developer's Mac).
 - `run_command` -- run a shell command on the Sun. **[implemented]**
   - request: `{ "verb":"run_command", "id":8, "cmd":"cc hello.c -o hello",
-              "cwd":"/export/home/me", "timeout_ms":60000 }`
-    (`cwd` and `timeout_ms` optional; absent cwd inherits, absent/<=0 timeout
-    waits indefinitely)
+              "cwd":"/export/home/me", "timeout_ms":60000, "user":"me" }`
+    (`cwd`, `timeout_ms`, `user` all optional; absent cwd inherits, absent/<=0
+    timeout waits indefinitely, absent/empty user runs as the daemon)
   - result: `{ "exit_code":N, "output":"<combined stdout+stderr>",
-              "timed_out":bool }`
+              "timed_out":bool [, "user":"<user>"] }`
   - `ok:true` means the command *ran*; a nonzero exit is reported in
-    `exit_code` (128+signal if killed), not as a daemon error. Only a
-    missing/invalid `cmd` is `ok:false`. Output is a JSON string (escaped);
-    file *content* still uses base64 (read_file/write_file).
+    `exit_code` (128+signal if killed), not as a daemon error. A
+    missing/invalid `cmd`, or an unknown `user`, is `ok:false`. Output is a JSON
+    string (escaped); file *content* still uses base64 (read_file/write_file).
+  - **`user` (run-as):** when set, the daemon (which runs as root) drops
+    privileges to that user before exec -- `getpwnam`-validated, then
+    `initgroups`+`setgid`+`setuid` with a login-ish `HOME`/`USER`/`LOGNAME`/
+    `SHELL` environment. A failed drop exits 127 rather than running as root.
+    Absent/empty `user` runs as the daemon (root) -- intended for admin tasks;
+    user-facing work (e.g. launching X clients) should always name a user so it
+    never runs as root. `user` is echoed back in the result when it was applied.
+    Requires the daemon to be root (it is, for shutdown / system writes).
 - `read_file` -- read a whole regular file. **[implemented]**
   - request: `{ "verb":"read_file", "id":20, "path":"/etc/hosts" }`
   - result: `{ "path":"...", "size":N, "mode":<low 12 perm bits, decimal>,
@@ -87,6 +95,30 @@ Ranked by priority (control holes first). Implemented verbs are marked.
     configs; else a new file defaults to 0644. mtime is deliberately **not**
     preserved (a write stamps it to now so `make` rebuilds). Missing/invalid
     `path` or `content`, or a non-regular existing target, is `ok:false`.
+  - **For small files only** (a config, a script). The whole payload rides one
+    base64 JSON line, so multi-MB files are slow/heavy -- use `put_file` for bulk.
+- `put_file` -- streaming file **upload**, for bulk transfers. **[implemented]**
+  - request header (one JSON line): `{ "verb":"put_file", "id":22,
+    "path":"/dest", "bytes":N, "mode":420 }` (`mode` optional) **followed
+    immediately by exactly N raw bytes** on the same connection.
+  - result: `{ "path":"...", "bytes_written":N, "mode":<final>, "created":bool }`
+  - This is the **one place the protocol carries a raw body** instead of pure
+    one-line JSON. The daemon streams the N bytes straight to a temp file in
+    bounded chunks (no base64, no full-file buffering) then atomic-renames over
+    the target -- same mode policy as `write_file`. It's how bulk bytes should
+    move (FTP/scp-speed), vs. `write_file`'s base64-in-one-line (fine only for
+    small files). Errors: a header with no usable `bytes` can't be framed, so
+    the daemon answers `ok:false` and **closes the connection**; a recoverable
+    error after the byte count is known (non-regular target, write failure)
+    drains the body to stay framed and answers `ok:false`.
+- `get_file` -- streaming file **download**, the `put_file` mirror. **[implemented]**
+  - request: `{ "verb":"get_file", "id":23, "path":"/src" }`
+  - on success: a header line `{ "id":23, "ok":true, "result":{ "path":"...",
+    "bytes":N, "mode":<perm> } }` **followed by exactly N raw bytes** (the file).
+    The client reads the header, then reads `result.bytes` raw bytes.
+  - Regular files only; a missing/non-regular path is `ok:false` with **no body**.
+    Same rationale as `put_file`: bulk bytes stream raw, not base64 (`read_file`
+    stays the small-file/base64 path).
 - `stat` -- metadata for one path. **[implemented]**
   - request: `{ "verb":"stat", "id":40, "path":"/etc/passwd" }`
   - result: `{ path, type, size, mode, uid, gid, mtime[, target] }`

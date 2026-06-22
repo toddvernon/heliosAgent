@@ -25,6 +25,7 @@
 #include <cx/b64/b64.h>
 #include <cx/base/buffer.h>
 #include <cx/base/slist.h>
+#include <cx/net/socket.h>
 
 #include <unistd.h>
 #include <time.h>
@@ -33,6 +34,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <pwd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -105,9 +107,11 @@ runError( double id, CxString message )
 // verbRun
 //
 // { "id":<id>, "ok":true, "result":{ "exit_code":N, "output":"...",
-//                                    "timed_out":bool } }
+//                                    "timed_out":bool [, "user":"..."] } }
 // ok:true means the command ran; a nonzero exit is reported in exit_code,
-// not as a daemon error. Missing/invalid "cmd" is the only ok:false case.
+// not as a daemon error. Missing/invalid "cmd" -- or an unknown "user" -- is
+// ok:false. With "user" set, the command runs as that user (the daemon, root,
+// drops privileges per request); absent, it runs as the daemon (root).
 //-------------------------------------------------------------------------
 CxString
 verbRun( double id, CxJSONObject *req )
@@ -132,6 +136,23 @@ verbRun( double id, CxJSONObject *req )
         }
     }
 
+    // user (optional string; empty/absent -> run as the daemon, root). When
+    // set, validate it here so the client gets a clean "unknown user" rather
+    // than an opaque exit 127 from the failed in-child drop.
+    CxString user;
+    const char *userPtr = (const char*)0;
+    CxJSONMember *um = req->find( "user" );
+    if ( um != (CxJSONMember*)0 && um->object() != (CxJSONBase*)0
+         && um->object()->type() == CxJSONBase::STRING ) {
+        user = ( (CxJSONString*) um->object() )->get();
+        if ( user.length() > 0 ) {
+            if ( getpwnam( user.data() ) == (struct passwd*)0 ) {
+                return runError( id, CxString( "run_command: unknown user '" ) + user + CxString( "'" ) );
+            }
+            userPtr = user.data();
+        }
+    }
+
     // timeout_ms (optional number; absent/<=0 -> no timeout)
     int timeout = 0;
     CxJSONMember *tm = req->find( "timeout_ms" );
@@ -141,12 +162,15 @@ verbRun( double id, CxJSONObject *req )
     }
 
     CxProcess proc;
-    proc.run( cmd.data(), cwdPtr, timeout );
+    proc.run( cmd.data(), cwdPtr, timeout, userPtr );
 
     CxJSONObject *result = new CxJSONObject();
     result->append( new CxJSONMember( "exit_code", new CxJSONNumber( (double) proc.getExitCode() ) ) );
     result->append( new CxJSONMember( "output",    new CxJSONString( proc.getOutput() ) ) );
     result->append( new CxJSONMember( "timed_out", new CxJSONBoolean( proc.wasTimedOut() ) ) );
+    if ( userPtr != (const char*)0 ) {
+        result->append( new CxJSONMember( "user", new CxJSONString( user ) ) );
+    }
 
     CxJSONObject resp;
     resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );
@@ -373,6 +397,230 @@ verbWriteFile( double id, CxJSONObject *req )
     resp.append( new CxJSONMember( "result", result ) );
 
     return resp.toJsonString();
+}
+
+
+//-------------------------------------------------------------------------
+// Streaming-verb helpers. The streaming verbs own their socket I/O, so they
+// frame their own responses (one JSON line + '\n') and bodies. A socket error
+// throws CxSocketException, which propagates to handleConnection (closes).
+//-------------------------------------------------------------------------
+static void
+streamSendLine( CxSocket &conn, CxString s )
+{
+    s.append( '\n' );
+    conn.sendAtLeast( s );
+}
+
+static CxString
+streamErrLine( double id, CxString message )
+{
+    CxJSONObject resp;
+    resp.append( new CxJSONMember( "id",    new CxJSONNumber( id ) ) );
+    resp.append( new CxJSONMember( "ok",    new CxJSONBoolean( 0 ) ) );
+    resp.append( new CxJSONMember( "error", new CxJSONString( message ) ) );
+    return resp.toJsonString();
+}
+
+// Consume and discard `total` raw bytes from the socket -- used to keep the
+// stream framed when a put_file fails AFTER the byte count is known (e.g. the
+// target is a directory). Throws on a socket error (connection then closes).
+static void
+streamDrain( CxSocket &conn, long total )
+{
+    char buf[ 65536 ];
+    long remaining = total;
+    while ( remaining > 0 ) {
+        int chunk = ( remaining > (long) sizeof( buf ) ) ? (int) sizeof( buf ) : (int) remaining;
+        conn.recvAtLeast( &(buf[0]), chunk );
+        remaining -= chunk;
+    }
+}
+
+
+//-------------------------------------------------------------------------
+// verbPutFileStream -- streaming upload. Header line { path, bytes:N [,mode] }
+// then N raw bytes. Streams straight to a temp file (no base64, no full
+// buffer), atomic-renames over path. See Verbs.h for the return contract.
+//-------------------------------------------------------------------------
+int
+verbPutFileStream( double id, CxJSONObject *req, CxSocket &conn )
+{
+    // path (required)
+    CxJSONMember *pm = req->find( "path" );
+    if ( pm == (CxJSONMember*)0 || pm->object() == (CxJSONBase*)0
+         || pm->object()->type() != CxJSONBase::STRING ) {
+        streamSendLine( conn, streamErrLine( id, CxString( "put_file: missing or non-string 'path'" ) ) );
+        return 2;   // no byte count -> can't drain -> must close
+    }
+    CxString path = ( (CxJSONString*) pm->object() )->get();
+
+    // bytes (required number, >= 0)
+    CxJSONMember *bm = req->find( "bytes" );
+    if ( bm == (CxJSONMember*)0 || bm->object() == (CxJSONBase*)0
+         || bm->object()->type() != CxJSONBase::NUMBER ) {
+        streamSendLine( conn, streamErrLine( id, CxString( "put_file: missing or non-number 'bytes'" ) ) );
+        return 2;
+    }
+    double bd = ( (CxJSONNumber*) bm->object() )->get();
+    if ( bd < 0 ) {
+        streamSendLine( conn, streamErrLine( id, CxString( "put_file: negative 'bytes'" ) ) );
+        return 2;
+    }
+    long total = (long) bd;
+
+    // mode (optional, low 12 perm bits)
+    int haveMode = 0;
+    long explicitMode = 0;
+    CxJSONMember *mm = req->find( "mode" );
+    if ( mm != (CxJSONMember*)0 && mm->object() != (CxJSONBase*)0
+         && mm->object()->type() == CxJSONBase::NUMBER ) {
+        explicitMode = (long) ( (CxJSONNumber*) mm->object() )->get();
+        haveMode = 1;
+    }
+
+    struct stat st;
+    int existed = ( stat( path.data(), &st ) == 0 );
+    if ( existed && ! S_ISREG( st.st_mode ) ) {
+        streamDrain( conn, total );   // keep framing, then report
+        streamSendLine( conn, streamErrLine( id, CxString( "put_file: not a regular file: " ) + path ) );
+        return 1;
+    }
+
+    CxString tmp = path + CxString( ".helios-tmp-" ) + CxString( (int) getpid() );
+    int fd = open( tmp.data(), O_WRONLY | O_CREAT | O_EXCL | O_TRUNC, 0600 );
+    if ( fd < 0 ) {
+        CxString err = CxString( strerror( errno ) );
+        streamDrain( conn, total );
+        streamSendLine( conn, streamErrLine( id, CxString( "put_file: create temp: " ) + err + ": " + tmp ) );
+        return 1;
+    }
+
+    // Stream the body to the temp file, one bounded chunk at a time. A socket
+    // error throws out of here; close+unlink first so we don't leak the temp.
+    char buf[ 65536 ];
+    long remaining = total;
+    int ioerr = 0;
+    while ( remaining > 0 ) {
+        int chunk = ( remaining > (long) sizeof( buf ) ) ? (int) sizeof( buf ) : (int) remaining;
+        try {
+            conn.recvAtLeast( &(buf[0]), chunk );
+        } catch ( ... ) {
+            close( fd );
+            unlink( tmp.data() );
+            return 2;                 // socket dead mid-body -> close
+        }
+        int w = 0;
+        while ( w < chunk ) {
+            int n = write( fd, buf + w, chunk - w );
+            if ( n < 0 ) { ioerr = 1; break; }
+            w += n;
+        }
+        if ( ioerr ) {
+            // disk write failed: we've still got `remaining-chunk` body bytes
+            // pending -- drain them so the connection stays framed.
+            CxString err = CxString( strerror( errno ) );
+            close( fd );
+            unlink( tmp.data() );
+            streamDrain( conn, remaining - chunk );
+            streamSendLine( conn, streamErrLine( id, CxString( "put_file: write: " ) + err + ": " + path ) );
+            return 1;
+        }
+        remaining -= chunk;
+    }
+    fsync( fd );
+
+    mode_t finalMode;
+    if ( haveMode )      finalMode = (mode_t) ( explicitMode & 07777 );
+    else if ( existed )  finalMode = (mode_t) ( st.st_mode & 07777 );
+    else                 finalMode = (mode_t) 0644;
+    if ( existed && geteuid() == 0 ) {
+        fchown( fd, st.st_uid, st.st_gid );
+    }
+    fchmod( fd, finalMode );
+    close( fd );
+
+    if ( rename( tmp.data(), path.data() ) != 0 ) {
+        CxString err = CxString( strerror( errno ) );
+        unlink( tmp.data() );
+        streamSendLine( conn, streamErrLine( id, CxString( "put_file: rename: " ) + err + ": " + path ) );
+        return 1;
+    }
+
+    CxJSONObject *result = new CxJSONObject();
+    result->append( new CxJSONMember( "path",          new CxJSONString( path ) ) );
+    result->append( new CxJSONMember( "bytes_written", new CxJSONNumber( (double) total ) ) );
+    result->append( new CxJSONMember( "mode",          new CxJSONNumber( (double) finalMode ) ) );
+    result->append( new CxJSONMember( "created",       new CxJSONBoolean( existed ? 0 : 1 ) ) );
+
+    CxJSONObject resp;
+    resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );
+    resp.append( new CxJSONMember( "ok",     new CxJSONBoolean( 1 ) ) );
+    resp.append( new CxJSONMember( "result", result ) );
+    streamSendLine( conn, resp.toJsonString() );
+    return 1;
+}
+
+
+//-------------------------------------------------------------------------
+// verbGetFileStream -- streaming download. Header line { path }. On success:
+// reply { ok:true, result:{ path, bytes:N, mode } } then N raw bytes from the
+// file. Missing/non-regular path -> ok:false, no body. See Verbs.h.
+//-------------------------------------------------------------------------
+int
+verbGetFileStream( double id, CxJSONObject *req, CxSocket &conn )
+{
+    CxJSONMember *pm = req->find( "path" );
+    if ( pm == (CxJSONMember*)0 || pm->object() == (CxJSONBase*)0
+         || pm->object()->type() != CxJSONBase::STRING ) {
+        streamSendLine( conn, streamErrLine( id, CxString( "get_file: missing or non-string 'path'" ) ) );
+        return 1;   // no body was promised; connection stays usable
+    }
+    CxString path = ( (CxJSONString*) pm->object() )->get();
+
+    // Open first, then fstat the open fd, so the size we advertise matches the
+    // bytes we send even if the file changes between stat and read.
+    int fd = open( path.data(), O_RDONLY );
+    if ( fd < 0 ) {
+        streamSendLine( conn, streamErrLine( id, CxString( "get_file: " ) + CxString( strerror( errno ) ) + ": " + path ) );
+        return 1;
+    }
+    struct stat st;
+    if ( fstat( fd, &st ) != 0 || ! S_ISREG( st.st_mode ) ) {
+        close( fd );
+        streamSendLine( conn, streamErrLine( id, CxString( "get_file: not a regular file: " ) + path ) );
+        return 1;
+    }
+    long size = (long) st.st_size;
+
+    CxJSONObject *result = new CxJSONObject();
+    result->append( new CxJSONMember( "path",  new CxJSONString( path ) ) );
+    result->append( new CxJSONMember( "bytes", new CxJSONNumber( (double) size ) ) );
+    result->append( new CxJSONMember( "mode",  new CxJSONNumber( (double) ( st.st_mode & 07777 ) ) ) );
+
+    CxJSONObject resp;
+    resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );
+    resp.append( new CxJSONMember( "ok",     new CxJSONBoolean( 1 ) ) );
+    resp.append( new CxJSONMember( "result", result ) );
+
+    try {
+        streamSendLine( conn, resp.toJsonString() );   // header
+
+        char buf[ 65536 ];
+        long remaining = size;
+        while ( remaining > 0 ) {
+            int chunk = ( remaining > (long) sizeof( buf ) ) ? (int) sizeof( buf ) : (int) remaining;
+            int n = read( fd, &(buf[0]), chunk );
+            if ( n <= 0 ) { break; }       // short read (file shrank); stop
+            conn.sendAtLeast( &(buf[0]), n );
+            remaining -= n;
+        }
+    } catch ( ... ) {
+        close( fd );
+        return 2;                          // socket died mid-body -> close
+    }
+    close( fd );
+    return 1;
 }
 
 

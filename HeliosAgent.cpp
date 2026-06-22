@@ -229,6 +229,24 @@ handleConnection( CxSocket conn )
             continue;
         }
 
+        // Streaming verbs (put_file/get_file) carry a raw body after the JSON
+        // header, so they need the socket directly. 0 = not streaming (fall
+        // through to the normal line dispatch); 1 = handled, keep serving;
+        // 2 = handled but the stream framing is unrecoverable, so close. A
+        // socket error mid-stream throws -> close the connection.
+        int streamed;
+        try {
+            streamed = heliosHandleStreaming( conn, line );
+        } catch ( ... ) {
+            break;
+        }
+        if ( streamed == 1 ) {
+            continue;
+        }
+        if ( streamed == 2 ) {
+            break;
+        }
+
         CxString response = heliosDispatch( line );
 
         // Operational log: the request (truncated so a write_file's base64 blob
@@ -277,25 +295,37 @@ main( int argc, char** argv )
     int         doDaemonize = 0;
     const char *logPath     = (const char*)0;
     const char *pidPath     = (const char*)0;
+    const char *secret      = (const char*)0;
 
     int c;
-    while ( ( c = getopt( argc, argv, "dp:l:P:" ) ) != -1 ) {
+    while ( ( c = getopt( argc, argv, "dp:l:P:s:" ) ) != -1 ) {
         switch ( c ) {
             case 'd': doDaemonize = 1;      break;
             case 'p': port    = atoi( optarg ); break;
             case 'l': logPath = optarg;     break;
             case 'P': pidPath = optarg;     break;
+            case 's': secret  = optarg;     break;
             default:
                 fprintf( stderr,
-                    "usage: %s [-d] [-p port] [-l logfile] [-P pidfile] [port]\n"
+                    "usage: %s [-d] [-p port] [-l logfile] [-P pidfile] [-s secret] [port]\n"
                     "  -d            daemonize (detach; for init). default: foreground\n"
                     "  -p port       listen port (default %d)\n"
                     "  -l logfile    append log here (default: stderr)\n"
-                    "  -P pidfile    write pid here (for init stop/restart)\n",
+                    "  -P pidfile    write pid here (for init stop/restart)\n"
+                    "  -s secret     require this secret in each request's \"auth\"\n"
+                    "                (default: HELIOS_SECRET env; absent = no auth)\n",
                     argv[0], HELIOS_DEFAULT_PORT );
                 return 1;
         }
     }
+    // Shared-secret auth: -s wins, else HELIOS_SECRET env, else none (open --
+    // the require-if-configured posture, so dev/tests with neither run open).
+    // The Solaris init script reads the secret from OBP (eeprom helios-secret),
+    // which macXserver sets per-boot via qemu -prom-env. See PROTOCOL.md / DECISIONS.
+    if ( secret == (const char*)0 ) {
+        secret = getenv( "HELIOS_SECRET" );
+    }
+    heliosSetSecret( secret );
     // Back-compat: a bare positional port (the old `heliosAgent <port>` form).
     if ( optind < argc ) {
         int p = atoi( argv[ optind ] );

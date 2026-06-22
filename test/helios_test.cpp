@@ -420,6 +420,31 @@ testRunCommand( void )
             delete o;
         }
     }
+
+    // run_as_user: an unknown user is rejected up front (ok:false), so the
+    // client gets a clean error rather than an opaque exit 127 from the failed
+    // in-child privilege drop. (A *successful* drop needs the daemon to be root
+    // and is validated on the guest, not here.)
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\": \"run_command\", \"id\": 13, \"cmd\": \"id\", \"user\": \"no_such_user_zzz\" }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 1 ) == 0, "unknown user ok==false" );
+            check( contains( getString( o, "error" ), "unknown user" ), "unknown user error mentions it" );
+            delete o;
+        }
+    }
+
+    // run_as_user: an empty user string is treated as absent (no drop) -- the
+    // command still runs as the daemon, ok==true.
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\": \"run_command\", \"id\": 14, \"cmd\": \"echo hi\", \"user\": \"\" }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 0 ) == 1, "empty user ok==true (no drop)" );
+            delete o;
+        }
+    }
 }
 
 
@@ -812,6 +837,56 @@ testSearch( void )
 
 
 //-----------------------------------------------------------------------------------------
+// testAuth -- shared-secret gate (require-if-configured). Sets a secret, checks
+// missing/wrong/right "auth", then restores the open posture so the rest of the
+// suite (which sends no auth) keeps passing.
+//-----------------------------------------------------------------------------------------
+static void
+testAuth( void )
+{
+    printf( "\n== auth (shared secret) ==\n" );
+
+    heliosSetSecret( "s3cr3t-xyz" );
+
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\":\"hello\", \"id\":70 }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 1 ) == 0, "no auth -> ok==false" );
+            check( contains( getString( o, "error" ), "unauthorized" ), "no auth -> 'unauthorized'" );
+            delete o;
+        }
+    }
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\":\"hello\", \"id\":71, \"auth\":\"wrong\" }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 1 ) == 0, "wrong auth -> ok==false" );
+            delete o;
+        }
+    }
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\":\"hello\", \"id\":72, \"auth\":\"s3cr3t-xyz\" }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 0 ) == 1, "correct auth -> ok==true" );
+            delete o;
+        }
+    }
+
+    heliosSetSecret( (const char*)0 );   // restore open posture
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\":\"hello\", \"id\":73 }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 0 ) == 1, "no secret configured -> open (ok==true)" );
+            delete o;
+        }
+    }
+}
+
+
+//-----------------------------------------------------------------------------------------
 // main
 //-----------------------------------------------------------------------------------------
 int
@@ -837,6 +912,7 @@ main( int argc, char **argv )
     testStat();
     testListDir();
     testSearch();
+    testAuth();
     testShutdown();
 
     printf( "\n======================\n" );
