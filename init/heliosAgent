@@ -39,10 +39,15 @@ start)
 	# the logs/console. (Deliberately not quoted in -s so an empty SECRET drops
 	# the flag entirely rather than passing "".)
 	SECRET=`eeprom helios-secret 2>/dev/null | grep '^helios-secret=' | sed 's/^helios-secret=//'`
+	# `-d` detaches once the daemon is bound + listening; a bind/listen failure
+	# exits nonzero *before* detaching, so the `&&` only fires on a real start.
+	# The "heliosAgent started" line lands on the boot console (this script's
+	# stdout during rc2) -- a reliable late-boot marker that coincides with when
+	# `hello` first answers.
 	if [ -n "$SECRET" ]; then
-		"$BIN" -d -p "$PORT" -l "$LOG" -P "$PIDFILE" -s "$SECRET"
+		"$BIN" -d -p "$PORT" -l "$LOG" -P "$PIDFILE" -s "$SECRET" && echo "heliosAgent started"
 	else
-		"$BIN" -d -p "$PORT" -l "$LOG" -P "$PIDFILE"
+		"$BIN" -d -p "$PORT" -l "$LOG" -P "$PIDFILE" && echo "heliosAgent started"
 	fi
 	;;
 
