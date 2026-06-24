@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <pwd.h>
+#include <grp.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -216,11 +217,90 @@ b64Decode( CxString b64 )
 
 
 //-------------------------------------------------------------------------
+// Run-as-user for the file verbs.
+//
+// The daemon runs as root, so by default a file verb sees root's view of the
+// filesystem and creates files owned by root. That's wrong for user-facing work
+// (a file browser): a browse should see the user's view and an upload should
+// land owned by the user, not root. So every file verb accepts an optional
+// "user" (same field run_command uses); when set, the op runs with that user's
+// effective uid/gid + supplementary groups, so the kernel's own permission
+// checks apply and new files are owned correctly.
+//
+// fork-per-connection (HeliosAgent.cpp) is what makes a process-wide euid/egid
+// change safe here: each request is served in its own short-lived child, one
+// request in flight, single-threaded -- the drop affects nothing else. We use
+// the *effective* ids (reversible) rather than a permanent setuid so the same
+// connection can serve a later request as root (e.g. an admin verb) after this
+// one restores.
+//
+// parseUserField: 0 = no user (run as the daemon/root, the historical default),
+// 1 = valid user (out params filled), -1 = present but unknown (caller returns a
+// clean ok:false). Mirrors run_command's getpwnam validation so the client gets
+// "unknown user" rather than an opaque EACCES.
+//-------------------------------------------------------------------------
+static int
+parseUserField( CxJSONObject *req, CxString &nameOut, uid_t &uidOut, gid_t &gidOut )
+{
+    CxJSONMember *um = req->find( "user" );
+    if ( um == (CxJSONMember*)0 || um->object() == (CxJSONBase*)0
+         || um->object()->type() != CxJSONBase::STRING ) {
+        return 0;
+    }
+    CxString name = ( (CxJSONString*) um->object() )->get();
+    if ( name.length() == 0 ) {
+        return 0;
+    }
+    nameOut = name;    // set before the lookup so the caller can name an unknown user
+    struct passwd *pw = getpwnam( name.data() );
+    if ( pw == (struct passwd*)0 ) {
+        return -1;
+    }
+    uidOut  = pw->pw_uid;
+    gidOut  = pw->pw_gid;
+    return 1;
+}
+
+// Scoped effective-uid/gid drop. drop() lowers privileges to the named user;
+// the destructor restores root. An unconstructed/never-dropped guard is inert,
+// so a verb with no "user" pays nothing. Drop order: groups + egid BEFORE euid
+// (each needs root). Restore order: euid(0) regains root FIRST, then egid -- you
+// cannot setegid once euid is non-root. A failed drop leaves us at root and
+// flips ok() false, so the caller refuses the op rather than silently running it
+// as root (the run_command "failed drop exits 127, never runs as root" rule).
+struct HeliosPrivGuard {
+    int   dropped;
+    int   okFlag;
+    gid_t savedEgid;
+
+    HeliosPrivGuard() : dropped( 0 ), okFlag( 1 ), savedEgid( 0 ) {}
+
+    void drop( const char *name, uid_t uid, gid_t gid ) {
+        savedEgid = getegid();
+        if ( initgroups( name, gid ) != 0 ) { okFlag = 0; return; }
+        if ( setegid( gid ) != 0 )          { okFlag = 0; return; }
+        if ( seteuid( uid ) != 0 )          { okFlag = 0; return; }
+        dropped = 1;
+    }
+
+    int ok() const { return okFlag; }
+
+    ~HeliosPrivGuard() {
+        if ( dropped ) {
+            seteuid( 0 );            // regain root before we can put egid back
+            setegid( savedEgid );
+        }
+    }
+};
+
+
+//-------------------------------------------------------------------------
 // verbReadFile
 //
 // { "id":<id>, "ok":true, "result":{ path, size, mode, encoding:"base64",
 //                                     content } }
-// Regular files only; a missing/non-regular path is ok:false.
+// Regular files only; a missing/non-regular path is ok:false. Accepts an
+// optional "user" (see HeliosPrivGuard) to read as that user.
 //-------------------------------------------------------------------------
 CxString
 verbReadFile( double id, CxJSONObject *req )
@@ -232,6 +312,20 @@ verbReadFile( double id, CxJSONObject *req )
         return runError( id, CxString( "read_file: missing or non-string 'path'" ) );
     }
     CxString path = ( (CxJSONString*) pm->object() )->get();
+
+    // Optional "user": read as that user (default = the daemon, root).
+    CxString uname; uid_t uuid = 0; gid_t ugid = 0;
+    int ur = parseUserField( req, uname, uuid, ugid );
+    if ( ur < 0 ) {
+        return runError( id, CxString( "read_file: unknown user '" ) + uname + CxString( "'" ) );
+    }
+    HeliosPrivGuard priv;
+    if ( ur == 1 ) {
+        priv.drop( uname.data(), uuid, ugid );
+        if ( ! priv.ok() ) {
+            return runError( id, CxString( "read_file: cannot run as user '" ) + uname + CxString( "'" ) );
+        }
+    }
 
     struct stat st;
     if ( stat( path.data(), &st ) != 0 ) {
@@ -314,6 +408,22 @@ verbWriteFile( double id, CxJSONObject *req )
         return runError( id, CxString( "write_file: missing or non-string 'content'" ) );
     }
     CxString content = ( (CxJSONString*) cm->object() )->get();
+
+    // Optional "user": write as that user (default = the daemon, root). The drop
+    // stays in scope through the temp-file create + rename, so a new file lands
+    // owned by the user and the rename is permission-checked as the user.
+    CxString uname; uid_t uuid = 0; gid_t ugid = 0;
+    int ur = parseUserField( req, uname, uuid, ugid );
+    if ( ur < 0 ) {
+        return runError( id, CxString( "write_file: unknown user '" ) + uname + CxString( "'" ) );
+    }
+    HeliosPrivGuard priv;
+    if ( ur == 1 ) {
+        priv.drop( uname.data(), uuid, ugid );
+        if ( ! priv.ok() ) {
+            return runError( id, CxString( "write_file: cannot run as user '" ) + uname + CxString( "'" ) );
+        }
+    }
 
     // mode (optional number; low 12 perm bits)
     int haveMode = 0;
@@ -479,6 +589,28 @@ verbPutFileStream( double id, CxJSONObject *req, CxSocket &conn )
         haveMode = 1;
     }
 
+    // Optional "user": upload as that user (default = the daemon, root). On a
+    // bad/unauthorized user the body still has to be drained so the connection
+    // stays framed -- same recovery as the not-a-regular-file path below. The
+    // drop stays in scope through the temp create + rename, so the uploaded file
+    // lands owned by the user.
+    CxString uname; uid_t uuid = 0; gid_t ugid = 0;
+    int ur = parseUserField( req, uname, uuid, ugid );
+    if ( ur < 0 ) {
+        streamDrain( conn, total );
+        streamSendLine( conn, streamErrLine( id, CxString( "put_file: unknown user '" ) + uname + CxString( "'" ) ) );
+        return 1;
+    }
+    HeliosPrivGuard priv;
+    if ( ur == 1 ) {
+        priv.drop( uname.data(), uuid, ugid );
+        if ( ! priv.ok() ) {
+            streamDrain( conn, total );
+            streamSendLine( conn, streamErrLine( id, CxString( "put_file: cannot run as user '" ) + uname + CxString( "'" ) ) );
+            return 1;
+        }
+    }
+
     struct stat st;
     int existed = ( stat( path.data(), &st ) == 0 );
     if ( existed && ! S_ISREG( st.st_mode ) ) {
@@ -577,6 +709,24 @@ verbGetFileStream( double id, CxJSONObject *req, CxSocket &conn )
         return 1;   // no body was promised; connection stays usable
     }
     CxString path = ( (CxJSONString*) pm->object() )->get();
+
+    // Optional "user": download as that user (default = the daemon, root). No
+    // body is promised until the ok header goes out, so a bad user is just a
+    // clean error line. The drop stays in scope through the open + stream.
+    CxString uname; uid_t uuid = 0; gid_t ugid = 0;
+    int ur = parseUserField( req, uname, uuid, ugid );
+    if ( ur < 0 ) {
+        streamSendLine( conn, streamErrLine( id, CxString( "get_file: unknown user '" ) + uname + CxString( "'" ) ) );
+        return 1;
+    }
+    HeliosPrivGuard priv;
+    if ( ur == 1 ) {
+        priv.drop( uname.data(), uuid, ugid );
+        if ( ! priv.ok() ) {
+            streamSendLine( conn, streamErrLine( id, CxString( "get_file: cannot run as user '" ) + uname + CxString( "'" ) ) );
+            return 1;
+        }
+    }
 
     // Open first, then fstat the open fd, so the size we advertise matches the
     // bytes we send even if the file changes between stat and read.
@@ -682,6 +832,20 @@ verbStat( double id, CxJSONObject *req )
     }
     CxString path = ( (CxJSONString*) pm->object() )->get();
 
+    // Optional "user": stat as that user (default = the daemon, root).
+    CxString uname; uid_t uuid = 0; gid_t ugid = 0;
+    int ur = parseUserField( req, uname, uuid, ugid );
+    if ( ur < 0 ) {
+        return runError( id, CxString( "stat: unknown user '" ) + uname + CxString( "'" ) );
+    }
+    HeliosPrivGuard priv;
+    if ( ur == 1 ) {
+        priv.drop( uname.data(), uuid, ugid );
+        if ( ! priv.ok() ) {
+            return runError( id, CxString( "stat: cannot run as user '" ) + uname + CxString( "'" ) );
+        }
+    }
+
     struct stat st;
     if ( lstat( path.data(), &st ) != 0 ) {
         return runError( id, CxString( "stat: " ) + CxString( strerror( errno ) ) + ": " + path );
@@ -729,6 +893,22 @@ verbListDir( double id, CxJSONObject *req )
         return runError( id, CxString( "list_dir: missing or non-string 'path'" ) );
     }
     CxString path = ( (CxJSONString*) pm->object() )->get();
+
+    // Optional "user": list as that user (default = the daemon, root). The drop
+    // covers opendir + the per-entry lstat below, so the listing reflects the
+    // user's own access (an unreadable dir comes back as a clean EACCES error).
+    CxString uname; uid_t uuid = 0; gid_t ugid = 0;
+    int ur = parseUserField( req, uname, uuid, ugid );
+    if ( ur < 0 ) {
+        return runError( id, CxString( "list_dir: unknown user '" ) + uname + CxString( "'" ) );
+    }
+    HeliosPrivGuard priv;
+    if ( ur == 1 ) {
+        priv.drop( uname.data(), uuid, ugid );
+        if ( ! priv.ok() ) {
+            return runError( id, CxString( "list_dir: cannot run as user '" ) + uname + CxString( "'" ) );
+        }
+    }
 
     DIR *dir = opendir( path.data() );
     if ( dir == (DIR*)0 ) {

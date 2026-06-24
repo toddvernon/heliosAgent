@@ -43,6 +43,22 @@ and sidesteps the JSON parser's NUL-termination edge. Metadata stays plain JSON.
 
 Ranked by priority (control holes first). Implemented verbs are marked.
 
+**Run-as (`user`) on the file verbs.** Like `run_command`, every file verb
+(`read_file`, `write_file`, `stat`, `list_dir`, `get_file`, `put_file`) accepts
+an optional `"user"`. The daemon runs as root, so without it a browse sees
+root's view of the filesystem and an upload lands owned by root -- wrong for
+user-facing tools (the macXserver file browser). When `user` is set, the daemon
+`getpwnam`-validates it, then does a reversible effective-id drop
+(`initgroups` + `setegid` + `seteuid`) for the duration of that one op, so the
+op is permission-checked AS the user and any new file is owned by the user; it
+restores root afterward. fork-per-connection makes the process-wide euid change
+safe (one short-lived child per request). An unknown user is `ok:false`
+("unknown user"); a drop that can't complete (e.g. the daemon isn't root) is
+`ok:false` ("cannot run as user") -- it fails closed, never silently operating
+as root. Absent/empty `user` keeps the historical root behavior (admin edits
+like the DNS editor). The drop needs the daemon to be root, which it is in the
+shipped guest.
+
 - `hello` -- liveness handshake. **[implemented]**
   - request: `{ "verb": "hello", "id": 1 }`
   - result: `{ "agent":"heliosAgent", "version":"0.1.0", "protocol":1,

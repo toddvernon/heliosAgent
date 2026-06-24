@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -775,6 +776,83 @@ testListDir( void )
 }
 
 
+// The optional "user" field on the file verbs (run-as for the file browser).
+// Two layers, both deterministic:
+//   - an unknown user is always rejected cleanly (ok:false, "unknown user");
+//   - a *known* user exercises the privilege drop. The drop uses initgroups,
+//     which requires root, so the outcome splits on who runs the suite:
+//       * as root (the production daemon): the drop succeeds, so a list/read
+//         as ourselves works;
+//       * as a normal user (Mac dev): the drop FAILS CLOSED -- ok:false,
+//         "cannot run as user" -- rather than silently operating as root.
+//     The fail-closed branch is the safety property that matters; we assert
+//     whichever branch applies so the test is green on either footing.
+static void
+testRunAsUser( void )
+{
+    printf( "\n== run-as user (file verbs) ==\n" );
+
+    int amRoot = ( geteuid() == 0 );
+
+    // who are we? getpwuid on the real uid -- a guaranteed-valid username.
+    struct passwd *self = getpwuid( getuid() );
+    CxString me = ( self != (struct passwd*)0 ) ? CxString( self->pw_name ) : CxString( "" );
+    check( me.length() > 0, "run-as: resolved current username" );
+
+    const char *dirp = "/tmp/helios_test_user";
+    shellRun( CxString( "rm -rf " ) + CxString( dirp ) );
+    check( mkdir( dirp, 0755 ) == 0, "run-as: fixture dir created" );
+    writeRaw( "/tmp/helios_test_user/owned.txt", "hi", 2, 0644 );
+
+    // unknown user -> ok:false, error names it. Deterministic (no drop attempted).
+    {
+        CxJSONObject *e = parseObject( heliosDispatch( CxString(
+            "{ \"verb\":\"list_dir\", \"id\":60, \"path\":\"" ) + CxString( dirp )
+            + CxString( "\", \"user\":\"no_such_user_xyz\" }" ) ) );
+        check( e != (CxJSONObject*)0, "run-as: unknown-user response parses" );
+        if ( e != (CxJSONObject*)0 ) {
+            check( getBool( e, "ok", 1 ) == 0, "run-as: unknown user ok==false" );
+            check( contains( getString( e, "error" ), "unknown user" ), "run-as: error says unknown user" );
+            delete e;
+        }
+    }
+
+    // known user -> drop is attempted. Root: succeeds. Non-root: fails closed.
+    {
+        CxJSONObject *o = parseObject( heliosDispatch( CxString(
+            "{ \"verb\":\"list_dir\", \"id\":61, \"path\":\"" ) + CxString( dirp )
+            + CxString( "\", \"user\":\"" ) + me + CxString( "\" }" ) ) );
+        check( o != (CxJSONObject*)0, "run-as: known-user response parses" );
+        if ( o != (CxJSONObject*)0 ) {
+            if ( amRoot ) {
+                check( getBool( o, "ok", 0 ) == 1, "run-as(root): list as self ok==true" );
+                CxJSONObject *r = getObject( o, "result" );
+                check( r != (CxJSONObject*)0 && getNumber( r, "count", -1 ) == 1, "run-as(root): sees the one file" );
+            } else {
+                check( getBool( o, "ok", 1 ) == 0, "run-as(non-root): drop fails closed, ok==false" );
+                check( contains( getString( o, "error" ), "cannot run as user" ), "run-as(non-root): error says cannot run as user" );
+            }
+            delete o;
+        }
+    }
+
+    // read_file with a user takes the same drop path -- same root/non-root split.
+    {
+        CxJSONObject *o = parseObject( heliosDispatch( CxString(
+            "{ \"verb\":\"read_file\", \"id\":62, \"path\":\"/tmp/helios_test_user/owned.txt\", \"user\":\"" )
+            + me + CxString( "\" }" ) ) );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 0 ) == ( amRoot ? 1 : 0 ),
+                   amRoot ? "run-as(root): read as self ok==true"
+                          : "run-as(non-root): read drop fails closed" );
+            delete o;
+        }
+    }
+
+    shellRun( CxString( "rm -rf " ) + CxString( dirp ) );
+}
+
+
 static void
 testSearch( void )
 {
@@ -911,6 +989,7 @@ main( int argc, char **argv )
     testWriteFile();
     testStat();
     testListDir();
+    testRunAsUser();
     testSearch();
     testAuth();
     testShutdown();

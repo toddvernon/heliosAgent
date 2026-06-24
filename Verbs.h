@@ -7,6 +7,13 @@
 //  verbs grow, the parsed request object) and returns a complete response line
 //  as a CxString. See PROTOCOL.md for the verb set and Dispatch.cpp for routing.
 //
+//  File verbs (read_file, write_file, stat, list_dir, get_file, put_file) take
+//  an optional "user": the daemon runs as root, so without it they see root's
+//  view and create root-owned files; with it they do a reversible euid/egid
+//  drop (HeliosPrivGuard in Verbs.cpp) so the op runs AS that user. An unknown
+//  user or a drop that can't complete is ok:false -- it fails closed, never
+//  runs as root.
+//
 //-------------------------------------------------------------------------------------------------
 
 #ifndef HELIOS_VERBS_H
