@@ -70,7 +70,9 @@ endif
 
 #if this is NETBSD
 ifeq ($(UNAME_S),netbsd)
+	ARCH := $(shell uname -m | tr '[A-Z]' '[a-z]')
 	CPPFLAGS = -D _NETBSD_ -g
+	PLATFORM_LIBS = -lpthread
 endif
 
 ## Object & Libraries #########################################
