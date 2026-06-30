@@ -25,6 +25,18 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifdef _SUNOS_
+// SunOS 4.1.4's pre-ANSI headers don't prototype getopt or its externs (the
+// getopt(3) man page tells you to declare them yourself), and g++ rejects the
+// undeclared optarg/optind. Declare them with C linkage here.
+extern "C" {
+    extern char *optarg;
+    extern int   optind;
+    extern int   opterr;
+    int getopt( int, char **, const char * );
+}
+#endif
+
 #include <cx/base/string.h>
 #include <cx/net/socket.h>
 #include <cx/net/inaddr.h>
@@ -53,6 +65,27 @@ static int       g_logOpen = 0;
 // shutdown verb can remove it on the way out.
 static const char *g_pidPath = (const char*)0;
 
+
+#ifdef _SUNOS_
+// SunOS 4.1.4 libc has no vsnprintf (it postdates 4.1.x). Emulate a bounded one
+// with vsprintf into a generous stack scratch, then a bounded copy. Safe here
+// because every heliosLog format fits well under 1K -- the only large arg, the
+// request line, is already %.140s-bounded at the call site. Stack scratch =
+// thread-safe (no shared state). vsprintf isn't prototyped in 4.1.4 either.
+extern "C" int vsprintf( char *, const char *, va_list );
+static int
+helios_vsnprintf( char *out, unsigned int n, const char *fmt, va_list ap )
+{
+    char scratch[ 4096 ];
+    int  len = vsprintf( scratch, fmt, ap );
+    unsigned int i = 0;
+    if ( n == 0 ) return len;
+    while ( i + 1 < n && scratch[ i ] != '\0' ) { out[ i ] = scratch[ i ]; i++; }
+    out[ i ] = '\0';
+    return len;
+}
+#define vsnprintf helios_vsnprintf
+#endif
 
 //-------------------------------------------------------------------------
 // heliosLog -- one log line, to the file if open else stderr. Formats into a

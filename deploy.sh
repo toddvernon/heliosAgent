@@ -1,46 +1,81 @@
 #!/bin/sh
 #
-# deploy.sh -- install heliosAgent into the Solaris init system, after build.
+# deploy.sh -- install heliosAgent into the guest's boot system, after build.
 #
-# Run as root on the Sun, from the heliosAgent source dir, AFTER `make`:
+# Multi-platform. Detects the guest OS and wires autostart the native way:
 #
-#   make
+#   Solaris 2.6 (SunOS 5.x)  -- SysV init: /etc/init.d + rc2.d/S98 + rcN.d/K30
+#   NetBSD 9.x               -- rc.d: /etc/rc.d/heliosagent + rc.conf=YES
+#   SunOS 4.1.4 (SunOS 4.x)  -- old BSD: a managed stanza in /etc/rc.local
+#
+# Run as root on the guest, from the heliosAgent source dir, AFTER building:
+#
+#   <build the binary -- make, or build_helios_netbsd.sh>
 #   ./deploy.sh
 #
-# It installs the freshly built binary to /usr/local/bin, drops the init script
-# into /etc/init.d, wires the rc symlinks (start at multiuser, kill on shutdown/
-# single-user), and (re)starts the daemon. Re-runnable: it's idempotent, so it
-# doubles as the upgrade path (rebuild, re-run, it restarts onto the new binary).
+# The binary is located automatically (see "locate the binary" below). The
+# NetBSD make-free bootstrap links it into the source dir as ./heliosAgent
+# rather than the makefile's <os>_<arch>/ dir, so both spots are searched.
+# Override explicitly with:  BIN=/path/to/heliosAgent ./deploy.sh
 #
-# Bourne-sh only (no bashisms): this has to run under Solaris 2.6 /bin/sh.
+# Re-runnable / idempotent: it doubles as the upgrade path -- rebuild, re-run,
+# and it restarts onto the new binary.
+#
+# Bourne-sh only -- this has to run under SunOS 4.1.4 /bin/sh too, so: backticks
+# not $(...), no `local`, no bashisms.
 
-# --- locations (keep LOG/PIDFILE in step with init/heliosAgent) ------------
-# The makefile names its build dir <os>_<arch>, but ARCH comes out empty on the
-# Suns (known make-system quirk), so the dir lands as e.g. "sunos_". Glob for
-# the binary so deploy works whether or not the arch suffix is present.
-OS=`uname -s | tr '[A-Z]' '[a-z]'`
-BIN=`ls ${OS}_*/heliosAgent 2>/dev/null | head -1`
+# --- locations (keep LOG/PIDFILE in step with the init scripts) ------------
+PORT=2125
 BINDEST=/usr/local/bin/heliosAgent
-INITSRC=init/heliosAgent
-INITDEST=/etc/init.d/heliosAgent
+LOG=/var/log/heliosAgent.log
+PIDFILE=/var/run/heliosAgent.pid
 
-# --- preflight -------------------------------------------------------------
-if [ ! -x "$BIN" ]; then
-	echo "deploy: $BIN not found -- run 'make' first."
+# --- detect the platform ---------------------------------------------------
+OS=`uname -s`
+REL=`uname -r`
+case "$OS" in
+	SunOS)
+		case "$REL" in
+			5.*) PLATFORM=solaris ;;
+			4.*) PLATFORM=sunos4  ;;
+			*)   PLATFORM=unknown ;;
+		esac ;;
+	NetBSD) PLATFORM=netbsd ;;
+	*)      PLATFORM=unknown ;;
+esac
+if [ "$PLATFORM" = unknown ]; then
+	echo "deploy: unsupported platform: $OS $REL (know solaris, netbsd, sunos4)"
 	exit 1
 fi
-if [ ! -f "$INITSRC" ]; then
-	echo "deploy: $INITSRC not found -- run from the heliosAgent source dir."
-	exit 1
-fi
+echo "deploy: platform = $PLATFORM ($OS $REL)"
 
-# Root check that works on Solaris 2.6 /usr/bin/id (no -u flag there): parse the
-# uid out of `id`'s "uid=0(root) ..." output.
+# --- root check ------------------------------------------------------------
+# SunOS 4/5 /usr/bin/id has no -u flag, so parse the uid out of "uid=0(root)...".
 UID=`id | sed 's/uid=\([0-9][0-9]*\).*/\1/'`
 if [ "$UID" != "0" ]; then
 	echo "deploy: must run as root (try: su root -c ./deploy.sh)."
 	exit 1
 fi
+
+# --- locate the binary -----------------------------------------------------
+# Search order: $BIN override, then ./heliosAgent (the make-free / source-dir
+# build), then the makefile's <os>_<arch>/heliosAgent (ARCH often comes out
+# empty on the Suns, so glob it). First executable hit wins. We deliberately do
+# NOT glob */heliosAgent, because init/heliosAgent is the (executable) control
+# script and must not be mistaken for the daemon.
+OSL=`echo "$OS" | tr '[A-Z]' '[a-z]'`
+if [ -z "$BIN" ]; then
+	for cand in ./heliosAgent ${OSL}_*/heliosAgent; do
+		if [ -x "$cand" ]; then BIN="$cand"; break; fi
+	done
+fi
+if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
+	echo "deploy: heliosAgent binary not found."
+	echo "        looked for ./heliosAgent and ${OSL}_*/heliosAgent"
+	echo "        build it first, or set BIN=/path/to/heliosAgent ./deploy.sh"
+	exit 1
+fi
+echo "deploy: binary = $BIN"
 
 # --- install the binary ----------------------------------------------------
 echo "deploy: installing $BIN -> $BINDEST"
@@ -48,27 +83,78 @@ mkdir -p /usr/local/bin
 cp "$BIN" "$BINDEST"
 chmod 755 "$BINDEST"
 
-# --- install the init script -----------------------------------------------
-echo "deploy: installing init script -> $INITDEST"
-cp "$INITSRC" "$INITDEST"
-chmod 755 "$INITDEST"
+# --- per-platform autostart wiring -----------------------------------------
+case "$PLATFORM" in
 
-# --- wire the rc symlinks (idempotent: remove then relink) -----------------
-# S98 = start near the end of multiuser bring-up; K30 = kill on the way down
-# (shutdown rc0, single-user rc1, single-user boot rcS).
-echo "deploy: wiring rc symlinks"
-rm -f /etc/rc2.d/S98heliosAgent
-ln -s ../init.d/heliosAgent /etc/rc2.d/S98heliosAgent
-for d in rc0.d rc1.d rcS.d; do
-	rm -f /etc/$d/K30heliosAgent
-	ln -s ../init.d/heliosAgent /etc/$d/K30heliosAgent
-done
+solaris|sunos4)
+	# Both use the SysV-style control script init/heliosAgent. It's framework-
+	# agnostic (pidfile + kill + eeprom secret), so it serves as the daemon
+	# control on SunOS 4 as well; only the *autostart* wiring differs.
+	INITSRC=init/heliosAgent
+	INITDEST=/etc/init.d/heliosAgent
+	if [ ! -f "$INITSRC" ]; then
+		echo "deploy: $INITSRC not found -- run from the heliosAgent source dir."
+		exit 1
+	fi
+	echo "deploy: installing control script -> $INITDEST"
+	mkdir -p /etc/init.d
+	cp "$INITSRC" "$INITDEST"
+	chmod 755 "$INITDEST"
 
-# --- (re)start onto the new binary -----------------------------------------
-echo "deploy: (re)starting heliosAgent"
-"$INITDEST" restart
+	if [ "$PLATFORM" = solaris ]; then
+		# SysV run-level symlinks: S98 start near end of multiuser, K30 kill
+		# on the way down (shutdown rc0, single-user rc1, single-user boot rcS).
+		echo "deploy: wiring SysV rc symlinks"
+		rm -f /etc/rc2.d/S98heliosAgent
+		ln -s ../init.d/heliosAgent /etc/rc2.d/S98heliosAgent
+		for d in rc0.d rc1.d rcS.d; do
+			rm -f /etc/$d/K30heliosAgent
+			ln -s ../init.d/heliosAgent /etc/$d/K30heliosAgent
+		done
+	else
+		# SunOS 4.1.4: no SysV run levels. Hook /etc/rc.local with a stanza
+		# bounded by markers, so re-running replaces it cleanly (idempotent).
+		echo "deploy: wiring /etc/rc.local stanza"
+		RCL=/etc/rc.local
+		if [ ! -f "$RCL" ]; then
+			echo "#!/bin/sh" > "$RCL"
+			chmod 755 "$RCL"
+		fi
+		TMP=/tmp/rc.local.$$
+		sed '/# BEGIN heliosAgent/,/# END heliosAgent/d' "$RCL" > "$TMP"
+		cat >> "$TMP" <<EOF
+# BEGIN heliosAgent (managed by deploy.sh -- do not edit between markers)
+if [ -x $INITDEST ]; then $INITDEST start; fi
+# END heliosAgent
+EOF
+		cp "$TMP" "$RCL"
+		rm -f "$TMP"
+	fi
 
-# --- report ----------------------------------------------------------------
-sleep 1
-"$INITDEST" status
-echo "deploy: done. logs: /var/log/heliosAgent.log   pid: /var/run/heliosAgent.pid"
+	echo "deploy: (re)starting heliosAgent"
+	"$INITDEST" restart
+	sleep 1
+	"$INITDEST" status
+	;;
+
+netbsd)
+	INITSRC=init/heliosagent.netbsd
+	INITDEST=/etc/rc.d/heliosagent
+	if [ ! -f "$INITSRC" ]; then
+		echo "deploy: $INITSRC not found -- run from the heliosAgent source dir."
+		exit 1
+	fi
+	echo "deploy: installing rc.d script -> $INITDEST"
+	cp "$INITSRC" "$INITDEST"
+	chmod 755 "$INITDEST"
+	# Enable in rc.conf (idempotent) so it starts at boot.
+	grep -q '^heliosagent=' /etc/rc.conf || echo 'heliosagent=YES' >> /etc/rc.conf
+	echo "deploy: (re)starting via rc.d"
+	"$INITDEST" restart
+	sleep 1
+	"$INITDEST" status
+	;;
+
+esac
+
+echo "deploy: done. platform=$PLATFORM  logs: $LOG  pid: $PIDFILE"

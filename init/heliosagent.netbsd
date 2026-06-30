@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# heliosagent -- NetBSD rc.d script for the heliosAgent control daemon.
+#
+# The NetBSD analogue of the Solaris SysV init script (init/heliosAgent): same
+# port (2125), logfile, and pidfile conventions, same OBP shared-secret pickup.
+# deploy.sh installs this to /etc/rc.d/heliosagent and sets heliosagent=YES in
+# /etc/rc.conf; you don't normally hand-install it.
+#
+# The daemon self-daemonizes with -d (it binds + listens BEFORE detaching, so a
+# failed bind exits nonzero and shows up at boot) and writes its own pidfile,
+# which rc.subr uses for stop/status.
+#
+# PROVIDE: heliosagent
+# REQUIRE: NETWORKING DAEMON
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="heliosagent"
+rcvar=$name
+command="/usr/local/bin/heliosAgent"
+pidfile="/var/run/heliosAgent.pid"
+heliosagent_logfile="/var/log/heliosAgent.log"
+heliosagent_port="2125"
+
+load_rc_config $name
+
+# Shared-secret auth, parity with the Solaris init script: macXserver may inject
+# a per-boot secret into OBP via qemu -prom-env 'helios-secret=...'; read it back
+# with eeprom(8). Empty (bare-metal or dev boot) -> the flag is dropped and the
+# daemon runs open. Never echoed, so it stays out of logs/console.
+_helios_secret=`eeprom helios-secret 2>/dev/null | sed -n 's/^helios-secret=//p'`
+if [ -n "$_helios_secret" ]; then
+	command_args="-d -p ${heliosagent_port} -l ${heliosagent_logfile} -P ${pidfile} -s ${_helios_secret}"
+else
+	command_args="-d -p ${heliosagent_port} -l ${heliosagent_logfile} -P ${pidfile}"
+fi
+
+run_rc_command "$1"

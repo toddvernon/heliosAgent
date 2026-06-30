@@ -46,18 +46,23 @@ ifeq ($(UNAME_S),sunos)
 
     ifeq ($(UNAME_R), 5.6)
         CPPFLAGS = -D _SOLARIS6_ -g
+        PLATFORM_LIBS = -lsocket -lnsl
     endif
 
     ifeq ($(UNAME_R), 5.7)
         CPPFLAGS = -D _SOLARIS6_ -g
+        PLATFORM_LIBS = -lsocket -lnsl
     endif
 
     ifeq ($(UNAME_R), 5.10)
         CPPFLAGS = -D _SOLARIS10_ -g
+        PLATFORM_LIBS = -lsocket -lnsl
     endif
 
-    # Solaris network functions need these explicitly.
-    PLATFORM_LIBS = -lsocket -lnsl
+    # Solaris (SunOS 5.x) splits socket/name-service out of libc, hence the
+    # -lsocket -lnsl above. SunOS 4.1.x (BSD) has them IN libc, so 4.1.3/4.1.4
+    # link with an empty PLATFORM_LIBS -- adding -lsocket there fails (no such
+    # library on 4.x).
 endif
 
 #if this is IRIX

@@ -38,17 +38,21 @@ ifeq ($(UNAME_S),sunos)
 
     ifeq ($(UNAME_R), 5.6)
         CPPFLAGS = -D _SOLARIS6_ -g
+        PLATFORM_LIBS = -lsocket -lnsl
     endif
 
     ifeq ($(UNAME_R), 5.7)
         CPPFLAGS = -D _SOLARIS6_ -g
+        PLATFORM_LIBS = -lsocket -lnsl
     endif
 
     ifeq ($(UNAME_R), 5.10)
         CPPFLAGS = -D _SOLARIS10_ -g
+        PLATFORM_LIBS = -lsocket -lnsl
     endif
 
-    PLATFORM_LIBS = -lsocket -lnsl
+    # SunOS 4.1.x (BSD) has sockets in libc; -lsocket/-lnsl are Solaris 2.x only,
+    # so 4.1.3/4.1.4 link with empty PLATFORM_LIBS.
 endif
 
 ifeq ($(UNAME_S),irix)
