@@ -13,10 +13,11 @@
 #   <build the binary -- make, or build_helios_netbsd.sh>
 #   ./deploy.sh
 #
-# The binary is located automatically (see "locate the binary" below). The
-# NetBSD make-free bootstrap links it into the source dir as ./heliosAgent
-# rather than the makefile's <os>_<arch>/ dir, so both spots are searched.
-# Override explicitly with:  BIN=/path/to/heliosAgent ./deploy.sh
+# The binary is located automatically (see "locate the binary" below): the
+# makefile's <PLATFORM_OS>_<arch>/heliosAgent build dir on EVERY platform (same
+# token cx's platform.mk uses -- solaris6 / solaris10 / sunos4 / netbsd), with a
+# source-dir ./heliosAgent (the make-free NetBSD bootstrap) only as a last
+# resort. Override explicitly with:  BIN=/path/to/heliosAgent ./deploy.sh
 #
 # Re-runnable / idempotent: it doubles as the upgrade path -- rebuild, re-run,
 # and it restarts onto the new binary.
@@ -33,14 +34,20 @@ PIDFILE=/var/run/heliosAgent.pid
 # --- detect the platform ---------------------------------------------------
 OS=`uname -s`
 REL=`uname -r`
+# PLATFORM   = autostart flavor (how we wire boot: SysV / rc.d / rc.local).
+# MKOS       = the makefile's PLATFORM_OS dir token (must match cx/platform.mk),
+#              used to find <MKOS>_<arch>/heliosAgent. Keep in sync with
+#              platform.mk: 4.x->sunos4, 5.6/5.7->solaris6, 5.10->solaris10.
 case "$OS" in
 	SunOS)
 		case "$REL" in
-			5.*) PLATFORM=solaris ;;
-			4.*) PLATFORM=sunos4  ;;
-			*)   PLATFORM=unknown ;;
+			4.*)     PLATFORM=sunos4;  MKOS=sunos4 ;;
+			5.6|5.7) PLATFORM=solaris; MKOS=solaris6 ;;
+			5.10)    PLATFORM=solaris; MKOS=solaris10 ;;
+			5.*)     PLATFORM=solaris; MKOS=sunos ;;
+			*)       PLATFORM=unknown ;;
 		esac ;;
-	NetBSD) PLATFORM=netbsd ;;
+	NetBSD) PLATFORM=netbsd; MKOS=netbsd ;;
 	*)      PLATFORM=unknown ;;
 esac
 if [ "$PLATFORM" = unknown ]; then
@@ -58,20 +65,20 @@ if [ "$UID" != "0" ]; then
 fi
 
 # --- locate the binary -----------------------------------------------------
-# Search order: $BIN override, then ./heliosAgent (the make-free / source-dir
-# build), then the makefile's <os>_<arch>/heliosAgent (ARCH often comes out
-# empty on the Suns, so glob it). First executable hit wins. We deliberately do
+# Search order: $BIN override, then the makefile's <MKOS>_<arch>/heliosAgent
+# build dir (the same on every platform -- ARCH often comes out empty on the
+# Suns, so glob it), then a source-dir ./heliosAgent (the make-free NetBSD
+# bootstrap) as a last resort. First executable hit wins. We deliberately do
 # NOT glob */heliosAgent, because init/heliosAgent is the (executable) control
 # script and must not be mistaken for the daemon.
-OSL=`echo "$OS" | tr '[A-Z]' '[a-z]'`
 if [ -z "$BIN" ]; then
-	for cand in ./heliosAgent ${OSL}_*/heliosAgent; do
+	for cand in ${MKOS}_*/heliosAgent ./heliosAgent; do
 		if [ -x "$cand" ]; then BIN="$cand"; break; fi
 	done
 fi
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
 	echo "deploy: heliosAgent binary not found."
-	echo "        looked for ./heliosAgent and ${OSL}_*/heliosAgent"
+	echo "        looked for ${MKOS}_*/heliosAgent and ./heliosAgent"
 	echo "        build it first, or set BIN=/path/to/heliosAgent ./deploy.sh"
 	exit 1
 fi
