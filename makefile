@@ -112,20 +112,7 @@ testclean:
 
 ## Archive ####################################################
 
-archive:
-	@echo "Creating heliosagent_unix.tar..."
-	@test -d ../../ARCHIVE || mkdir ../../ARCHIVE
-	@cd ../.. && tar cvf ARCHIVE/heliosagent_unix.tar \
-		--exclude='._*' \
-		--exclude='*.o' \
-		--exclude='*.a' \
-		--exclude='.git' \
-		--exclude='.claude' \
-		--exclude='.DS_Store' \
-		--exclude='darwin_*' \
-		--exclude='linux_*' \
-		--exclude='sunos_*' \
-		--exclude='irix_*' \
-		--exclude='netbsd_*' \
-		cx_apps/heliosAgent
-	@echo "Archive created: ../../ARCHIVE/heliosagent_unix.tar"
+# Archives are built from the umbrella makefile (../../makefile), not here.
+# heliosAgent ships inside cxapps_unix.tar (with cm, psd):
+#   make -C ../.. cxapps_unix.tar
+# One place to maintain the object/binary exclusion.
