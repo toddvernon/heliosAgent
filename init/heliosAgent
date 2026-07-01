@@ -31,6 +31,11 @@ start)
 		echo "heliosAgent: $BIN not found or not executable"
 		exit 1
 	fi
+	# Ensure the pidfile/log dirs exist before launching. SunOS 4.1.4 has no
+	# /var/run, so without this the daemon starts but silently can't write
+	# PIDFILE -- then stop/restart/status go blind and daemons accumulate on
+	# each boot. mkdir -p is a no-op where the dirs already exist (Solaris).
+	mkdir -p `dirname "$PIDFILE"` `dirname "$LOG"` 2>/dev/null
 	echo "Starting heliosAgent."
 	# Shared-secret auth: macXserver sets a per-boot random secret in OBP via
 	# qemu -prom-env 'helios-secret=...'; read it back with eeprom. The grep
