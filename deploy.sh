@@ -87,8 +87,14 @@ echo "deploy: binary = $BIN"
 # --- install the binary ----------------------------------------------------
 echo "deploy: installing $BIN -> $BINDEST"
 mkdir -p /usr/local/bin
-cp "$BIN" "$BINDEST"
-chmod 755 "$BINDEST"
+# Install atomically via a temp name + rename. On the upgrade path the daemon
+# is still running from $BINDEST, so a direct `cp` over it fails with ETXTBSY
+# ("Text file busy") and would silently leave the OLD binary in place (the
+# restart below then runs stale code). rename() over a busy executable is fine
+# -- the running process keeps its inode until the restart execs the new file.
+cp "$BIN" "$BINDEST.new"
+chmod 755 "$BINDEST.new"
+mv "$BINDEST.new" "$BINDEST"
 
 # --- per-platform autostart wiring -----------------------------------------
 case "$PLATFORM" in
