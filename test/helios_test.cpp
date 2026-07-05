@@ -915,15 +915,18 @@ testSearch( void )
 
 
 //-----------------------------------------------------------------------------------------
-// testAuth -- shared-secret gate (require-if-configured). Sets a secret, checks
-// missing/wrong/right "auth", then restores the open posture so the rest of the
-// suite (which sends no auth) keeps passing.
+// testAuth -- shared-secret gate (require-always / fail-closed). Turns off the
+// open posture the rest of the suite runs under, checks missing/wrong/right
+// "auth" against a secret, then checks that NO secret configured now DENIES
+// (rather than opening), and finally restores the open posture so the remaining
+// tests (which send no auth) keep passing.
 //-----------------------------------------------------------------------------------------
 static void
 testAuth( void )
 {
     printf( "\n== auth (shared secret) ==\n" );
 
+    heliosSetOpen( 0 );                  // enforce (the suite otherwise runs open)
     heliosSetSecret( "s3cr3t-xyz" );
 
     {
@@ -952,12 +955,25 @@ testAuth( void )
         }
     }
 
-    heliosSetSecret( (const char*)0 );   // restore open posture
+    // Fail-closed: no secret configured now DENIES every request (was "open").
+    heliosSetSecret( (const char*)0 );
     {
         CxString resp = heliosDispatch( CxString( "{ \"verb\":\"hello\", \"id\":73 }" ) );
         CxJSONObject *o = parseObject( resp );
         if ( o != (CxJSONObject*)0 ) {
-            check( getBool( o, "ok", 0 ) == 1, "no secret configured -> open (ok==true)" );
+            check( getBool( o, "ok", 1 ) == 0, "no secret configured -> deny (ok==false)" );
+            check( contains( getString( o, "error" ), "unauthorized" ), "no secret -> 'unauthorized'" );
+            delete o;
+        }
+    }
+
+    // Explicit open posture: unauthenticated requests are allowed again.
+    heliosSetOpen( 1 );
+    {
+        CxString resp = heliosDispatch( CxString( "{ \"verb\":\"hello\", \"id\":74 }" ) );
+        CxJSONObject *o = parseObject( resp );
+        if ( o != (CxJSONObject*)0 ) {
+            check( getBool( o, "ok", 0 ) == 1, "allow_open -> unauthenticated ok==true" );
             delete o;
         }
     }
@@ -977,6 +993,12 @@ main( int argc, char **argv )
 
     printf( "heliosAgent Test Suite\n" );
     printf( "======================\n" );
+
+    // The daemon is require-always (fail-closed): with no secret every request
+    // is denied. This suite sends no "auth" on most calls, so run it under the
+    // explicit open posture (the -O / allow_open equivalent). testAuth() toggles
+    // this off to exercise the gate, then restores it.
+    heliosSetOpen( 1 );
 
     testHello();
     testUnknownVerb();

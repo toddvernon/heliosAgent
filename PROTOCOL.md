@@ -175,9 +175,20 @@ dropped connection.
 - Default listen port is 2125 (`-p` to change; a bare positional port still
   works for back-compat).
 - Binds INADDR_ANY so it's reachable through slirp inside the guest, with
-  SO_REUSEADDR set so a restart doesn't trip over a port in TIME_WAIT. There is
-  no authentication yet -- the posture is localhost-only-via-hostfwd. Auth for
-  the bare-metal-Sun case is a documented later concern (HELIOS_PLAN.md B7).
+  SO_REUSEADDR set so a restart doesn't trip over a port in TIME_WAIT.
+- Shared-secret auth (require-always / fail-closed). Each request must carry an
+  `auth` string matching the daemon's secret. The secret is taken, in order,
+  from: `-s`, `HELIOS_SECRET`, `-S <file>` / `HELIOS_SECRET_FILE`, then the
+  default file `/etc/helios/helios.json` -- JSON `{ "secret": "...",
+  "allow_open": false }` with an optional leading `#` comment banner. On the
+  QEMU guests the init script supplies `-s` from OBP (`eeprom helios-secret`, set
+  per-boot by macXserver); physical servers use the file. With NO secret from any
+  source the daemon keeps running but DENIES every request -- it never silently
+  falls open. The only way to serve unauthenticated is the explicit `-O` flag or
+  `"allow_open": true` in the file (dev boxes). A wrong/absent `auth` returns
+  `ok:false` "unauthorized"; on the streaming verbs the connection is closed.
+  Honest scope: a plaintext secret on a cleartext channel is a speed-bump, not
+  crypto -- an HMAC/TLS upgrade is the LAN follow-up (HELIOS_PLAN.md B7).
 - Runs as a proper daemon for the guest: `-d` double-forks and detaches, `-l`
   appends a timestamped/pid-stamped log (CxLogFile), `-P` writes a pidfile, and
   SIGTERM stops cleanly (removes the pidfile). `init/heliosAgent` is the SVR4

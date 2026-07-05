@@ -96,6 +96,31 @@ cp "$BIN" "$BINDEST.new"
 chmod 755 "$BINDEST.new"
 mv "$BINDEST.new" "$BINDEST"
 
+# --- secret directory (never clobber an existing secret) -------------------
+# On real hardware (no OBP eeprom secret) the daemon reads its shared secret from
+# /etc/helios/helios.json. Make the directory so an admin has a locked-down place
+# to drop it, but NEVER create or overwrite the file itself: on an over-helios
+# redeploy that would change the secret out from under the client doing the
+# deploy and lock it out (recoverable only via ssh/console).
+SECRETDIR=/etc/helios
+SECRETFILE=$SECRETDIR/helios.json
+mkdir -p "$SECRETDIR"
+chmod 700 "$SECRETDIR"
+
+# --- lockout guard ---------------------------------------------------------
+# After the restart below the new daemon is fail-closed: with no OBP secret and
+# no secret file it DENIES every request. If this deploy is running over helios
+# itself, that drops the deploying client with no way back except ssh/console.
+# Warn loudly -- don't block, since a hand/ssh deploy is a legitimate way to
+# bootstrap the very first secret.
+EEPROM_SECRET=`eeprom helios-secret 2>/dev/null | grep '^helios-secret=' | sed 's/^helios-secret=//'`
+if [ -z "$EEPROM_SECRET" ] && [ ! -f "$SECRETFILE" ]; then
+	echo "deploy: WARNING -- no OBP secret and no $SECRETFILE:"
+	echo "deploy:   the (re)started agent will DENY ALL requests (fail-closed)."
+	echo "deploy:   if you are deploying over helios you will lose the channel."
+	echo "deploy:   create $SECRETFILE (mode 600) or recover via ssh/console."
+fi
+
 # --- per-platform autostart wiring -----------------------------------------
 case "$PLATFORM" in
 

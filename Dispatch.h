@@ -17,10 +17,16 @@
 
 class CxSocket;   // forward decl (the streaming verbs need the connection)
 
-// Configure the shared secret required in each request's "auth" field. NULL or
-// "" means no auth (every request allowed) -- the require-if-configured posture.
-// Set once at startup before serving. See Dispatch.cpp / PROTOCOL.md.
+// Configure the shared secret required in each request's "auth" field. Set once
+// at startup before serving. Posture is require-always (fail-closed): with a
+// secret set, each request must carry a matching "auth"; with NO secret set
+// (NULL/""), every request is DENIED -- unless heliosSetOpen(1) was called. See
+// Dispatch.cpp / PROTOCOL.md.
 void heliosSetSecret( const char *secret );
+
+// Opt into the open (unauthenticated) posture: every request is allowed even
+// with no secret. For dev/test and the explicit -O / "allow_open":true only.
+void heliosSetOpen( int open );
 
 // requestLine is one JSON object (no trailing newline). Returns the response
 // JSON object as a CxString (no trailing newline; the caller adds framing).

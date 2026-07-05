@@ -15,6 +15,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <signal.h>
 #include <errno.h>
 #include <time.h>
@@ -42,6 +43,13 @@ extern "C" {
 #include <cx/net/inaddr.h>
 #include <cx/log/logfile.h>
 
+#include <cx/json/json_factory.h>
+#include <cx/json/json_base.h>
+#include <cx/json/json_object.h>
+#include <cx/json/json_member.h>
+#include <cx/json/json_string.h>
+#include <cx/json/json_boolean.h>
+
 #include "Dispatch.h"
 #include "Verbs.h"
 #include "HeliosVersion.h"
@@ -50,6 +58,13 @@ extern "C" {
 // hostfwd (127.0.0.1:<hostport> -> guest:<this>). Port discipline and bind/auth
 // posture are open items (HELIOS_PLAN.md B7); override with argv[1] for now.
 #define HELIOS_DEFAULT_PORT 2125
+
+// Default shared-secret config file, read when no -s / HELIOS_SECRET / -S is
+// given. JSON: { "secret": "...", "allow_open": false }, with an optional
+// leading '#' comment banner. Physical servers drop the secret here; the QEMU
+// guests get it from OBP via the init script's -s instead. See
+// heliosLoadSecretFile() and PROTOCOL.md.
+#define HELIOS_DEFAULT_SECRET_FILE "/etc/helios/helios.json"
 
 // Daemon start time, for the hello verb's uptime field. Read by Verbs.cpp.
 time_t g_heliosStartTime = 0;
@@ -315,6 +330,124 @@ handleConnection( CxSocket conn )
 
 
 //-------------------------------------------------------------------------
+// heliosLoadSecretFile
+//
+// Read a JSON secret config that may carry a leading comment banner: blank
+// lines or lines whose first non-blank char is '#', ahead of the JSON object
+// (JSON has no native comments, so we strip the banner, then parse the rest).
+// Pulls "secret" (string) and "allow_open" (bool, default false).
+//
+// Returns 0 on success (outSecret empty if the file has no "secret"), or -1 on
+// error with outWarn set to a one-line reason. The caller treats both an empty
+// secret and an error as "no secret", which -- unless allow_open -- means the
+// daemon runs but denies every request. Never leaks the secret into outWarn.
+//-------------------------------------------------------------------------
+static int
+heliosLoadSecretFile( const char *path, CxString &outSecret,
+                      int &outAllowOpen, CxString &outWarn )
+{
+    outAllowOpen = 0;
+
+    struct stat st;
+    if ( stat( path, &st ) != 0 ) {
+        outWarn = CxString( "secret file " ) + path + ": " + CxString( strerror( errno ) );
+        return -1;
+    }
+    if ( ! S_ISREG( st.st_mode ) ) {
+        outWarn = CxString( "secret file " ) + path + ": not a regular file";
+        return -1;
+    }
+
+    int fd = open( path, O_RDONLY );
+    if ( fd < 0 ) {
+        outWarn = CxString( "secret file " ) + path + ": " + CxString( strerror( errno ) );
+        return -1;
+    }
+
+    unsigned int size = (unsigned int) st.st_size;
+    char *buf = (char*) malloc( size + 1 );              // +1 for the NUL
+    if ( buf == (char*)0 ) {
+        close( fd );
+        outWarn = CxString( "secret file " ) + path + ": out of memory";
+        return -1;
+    }
+    unsigned int got = 0;
+    while ( got < size ) {
+        int n = read( fd, buf + got, size - got );
+        if ( n < 0 ) {
+            CxString e( strerror( errno ) );
+            free( buf );
+            close( fd );
+            outWarn = CxString( "secret file " ) + path + ": " + e;
+            return -1;
+        }
+        if ( n == 0 ) {
+            break;                                        // file shrank; use what we got
+        }
+        got += (unsigned int) n;
+    }
+    close( fd );
+    buf[ got ] = '\0';
+
+    // Strip a leading comment banner: whole lines that are blank or whose first
+    // non-whitespace char is '#', up to the start of the JSON payload.
+    char *p = buf;
+    for ( ;; ) {
+        char *lineStart = p;
+        while ( *p == ' ' || *p == '\t' ) {
+            p++;
+        }
+        if ( *p == '#' ) {                                // comment line -> skip to EOL
+            while ( *p != '\0' && *p != '\n' ) {
+                p++;
+            }
+            if ( *p == '\n' ) {
+                p++;
+            }
+            continue;
+        }
+        if ( *p == '\n' ) {                               // blank line -> skip
+            p++;
+            continue;
+        }
+        if ( *p == '\0' ) {                               // nothing but banner
+            p = lineStart;
+            break;
+        }
+        break;                                             // first JSON line
+    }
+
+    CxString json( p );
+    free( buf );
+
+    CxJSONBase *root = CxJSONFactory::parse( json );
+    if ( root == (CxJSONBase*)0 || root->type() != CxJSONBase::OBJECT ) {
+        if ( root != (CxJSONBase*)0 ) {
+            delete root;
+        }
+        outWarn = CxString( "secret file " ) + path + ": malformed JSON";
+        return -1;
+    }
+    CxJSONObject *obj = (CxJSONObject*) root;
+
+    CxJSONMember *am = obj->find( "allow_open" );
+    if ( am != (CxJSONMember*)0 && am->object() != (CxJSONBase*)0
+         && am->object()->type() == CxJSONBase::BOOLEAN ) {
+        outAllowOpen = ( (CxJSONBoolean*) am->object() )->get();
+    }
+
+    CxJSONMember *sm = obj->find( "secret" );
+    if ( sm != (CxJSONMember*)0 && sm->object() != (CxJSONBase*)0
+         && sm->object()->type() == CxJSONBase::STRING ) {
+        outSecret = ( (CxJSONString*) sm->object() )->get();   // copies; safe after delete
+    }
+
+    delete root;
+    return 0;
+}
+
+
+//-------------------------------------------------------------------------
 // main
 //-------------------------------------------------------------------------
 int
@@ -329,36 +462,91 @@ main( int argc, char** argv )
     const char *logPath     = (const char*)0;
     const char *pidPath     = (const char*)0;
     const char *secret      = (const char*)0;
+    const char *secretFile  = (const char*)0;   // -S / HELIOS_SECRET_FILE (JSON)
+    int         allowOpen   = 0;                 // -O / "allow_open":true
 
     int c;
-    while ( ( c = getopt( argc, argv, "dp:l:P:s:" ) ) != -1 ) {
+    while ( ( c = getopt( argc, argv, "dp:l:P:s:S:O" ) ) != -1 ) {
         switch ( c ) {
             case 'd': doDaemonize = 1;      break;
             case 'p': port    = atoi( optarg ); break;
             case 'l': logPath = optarg;     break;
             case 'P': pidPath = optarg;     break;
-            case 's': secret  = optarg;     break;
+            case 's': secret     = optarg;  break;
+            case 'S': secretFile = optarg;  break;
+            case 'O': allowOpen  = 1;       break;
             default:
                 fprintf( stderr,
-                    "usage: %s [-d] [-p port] [-l logfile] [-P pidfile] [-s secret] [port]\n"
+                    "usage: %s [-d] [-p port] [-l logfile] [-P pidfile] [-s secret] [-S file] [-O] [port]\n"
                     "  -d            daemonize (detach; for init). default: foreground\n"
                     "  -p port       listen port (default %d)\n"
                     "  -l logfile    append log here (default: stderr)\n"
                     "  -P pidfile    write pid here (for init stop/restart)\n"
-                    "  -s secret     require this secret in each request's \"auth\"\n"
-                    "                (default: HELIOS_SECRET env; absent = no auth)\n",
+                    "  -s secret     shared secret required in each request's \"auth\"\n"
+                    "  -S file       read the secret from a JSON file { \"secret\": \"...\" }\n"
+                    "                (default: HELIOS_SECRET env, then " HELIOS_DEFAULT_SECRET_FILE ")\n"
+                    "  -O            run OPEN (no auth) -- dev only. Default: require a\n"
+                    "                secret, denying every request until one is set\n",
                     argv[0], HELIOS_DEFAULT_PORT );
                 return 1;
         }
     }
-    // Shared-secret auth: -s wins, else HELIOS_SECRET env, else none (open --
-    // the require-if-configured posture, so dev/tests with neither run open).
-    // The Solaris init script reads the secret from OBP (eeprom helios-secret),
-    // which macXserver sets per-boot via qemu -prom-env. See PROTOCOL.md / DECISIONS.
-    if ( secret == (const char*)0 ) {
-        secret = getenv( "HELIOS_SECRET" );
+    // Shared-secret auth, require-always (fail-closed). Secret precedence: -s,
+    // then HELIOS_SECRET env, then -S / HELIOS_SECRET_FILE, then the default
+    // file /etc/helios/helios.json. On the QEMU guests the init script passes -s
+    // from OBP (eeprom helios-secret, set per-boot by macXserver); physical
+    // servers use the file. With NO secret from any source the daemon still runs
+    // but DENIES every request -- it serves unauthenticated only when -O /
+    // "allow_open":true is set explicitly (dev). A present-but-broken secret
+    // file (bad perms / bad JSON) also lands in deny-all, never open. The posture
+    // is applied (heliosSetSecret/Open) further down, once the logfile is open,
+    // so any warning lands in the log rather than a daemon's /dev/null'd stderr.
+    // See PROTOCOL.md.
+    CxString    fileSecret;                       // backs a file-sourced secret;
+                                                  // must outlive heliosSetSecret
+    CxString    cfgWarn;                          // deferred config warning
+    const char *secretSource = "none";
+
+    if ( secret != (const char*)0 && secret[0] != '\0' ) {
+        secretSource = "-s flag";
+    } else {
+        secret = (const char*)0;
+        const char *env = getenv( "HELIOS_SECRET" );
+        if ( env != (const char*)0 && env[0] != '\0' ) {
+            secret = env;
+            secretSource = "HELIOS_SECRET env";
+        } else {
+            const char *path         = secretFile;
+            int         explicitPath = 0;
+            if ( path == (const char*)0 ) {
+                path = getenv( "HELIOS_SECRET_FILE" );
+            }
+            if ( path != (const char*)0 ) {
+                explicitPath = 1;
+            } else {
+                path = HELIOS_DEFAULT_SECRET_FILE;
+            }
+
+            struct stat cst;
+            if ( stat( path, &cst ) == 0 ) {
+                int fileAllowOpen = 0;
+                if ( heliosLoadSecretFile( path, fileSecret, fileAllowOpen, cfgWarn ) == 0 ) {
+                    if ( fileSecret.length() > 0 ) {
+                        secret       = fileSecret.data();
+                        secretSource = path;
+                    }
+                    if ( fileAllowOpen ) {
+                        allowOpen = 1;
+                    }
+                }
+                // load error -> cfgWarn set, secret stays null -> deny-all
+            } else if ( explicitPath ) {
+                cfgWarn = CxString( "secret file " ) + path + ": "
+                        + CxString( strerror( errno ) );
+            }
+            // default path merely absent: no warning, silent deny-all
+        }
     }
-    heliosSetSecret( secret );
     // Back-compat: a bare positional port (the old `heliosAgent <port>` form).
     if ( optind < argc ) {
         int p = atoi( argv[ optind ] );
@@ -432,6 +620,26 @@ main( int argc, char** argv )
         if ( writePidFile( pidPath ) != 0 ) {
             heliosLog( 1, "could not write pidfile %s", pidPath );
         }
+    }
+
+    // Apply the auth posture now that the logfile is open, so a deny-all/open
+    // warning lands in the log rather than on a daemon's /dev/null'd stderr.
+    // require-always: with no secret and no explicit -O/allow_open, every
+    // request is denied (the daemon keeps running, but serves no one).
+    heliosSetSecret( secret );
+    heliosSetOpen( allowOpen );
+    if ( cfgWarn.length() > 0 ) {
+        heliosLog( 1, "%s", cfgWarn.data() );
+    }
+    if ( allowOpen ) {
+        heliosLog( 1, "auth DISABLED: running OPEN (unauthenticated) -- "
+                      "allow_open/-O set; dev only" );
+    } else if ( secret == (const char*)0 ) {
+        heliosLog( 1, "no secret configured (-s, HELIOS_SECRET, "
+                      "-S/HELIOS_SECRET_FILE, %s): auth required, DENYING every "
+                      "request until one is set", HELIOS_DEFAULT_SECRET_FILE );
+    } else {
+        heliosLog( 0, "shared-secret auth enabled (source: %s)", secretSource );
     }
 
     heliosLog( 0, "heliosAgent %s (protocol %d) listening on port %d, pid %ld%s",

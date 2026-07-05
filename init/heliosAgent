@@ -39,10 +39,13 @@ start)
 	echo "Starting heliosAgent."
 	# Shared-secret auth: macXserver sets a per-boot random secret in OBP via
 	# qemu -prom-env 'helios-secret=...'; read it back with eeprom. The grep
-	# yields the value only when set (else empty), so a guest booted without it
-	# (e.g. a bare-metal Sun, or dev) runs open. Never echoed -- it stays out of
-	# the logs/console. (Deliberately not quoted in -s so an empty SECRET drops
-	# the flag entirely rather than passing "".)
+	# yields the value only when set (else empty). When empty (a bare-metal Sun,
+	# or dev), the -s flag is dropped and the daemon falls back to its own secret
+	# sources -- HELIOS_SECRET, then /etc/helios/helios.json. With none of those
+	# it still runs but DENIES every request (fail-closed), never open; recover
+	# via ssh/console and drop a secret file. Never echoed -- it stays out of the
+	# logs/console. (Deliberately not quoted in -s so an empty SECRET drops the
+	# flag entirely rather than passing "".)
 	SECRET=`eeprom helios-secret 2>/dev/null | grep '^helios-secret=' | sed 's/^helios-secret=//'`
 	# `-d` detaches once the daemon is bound + listening; a bind/listen failure
 	# exits nonzero *before* detaching, so the `&&` only fires on a real start.

@@ -29,7 +29,9 @@ load_rc_config $name
 # Shared-secret auth, parity with the Solaris init script: macXserver may inject
 # a per-boot secret into OBP via qemu -prom-env 'helios-secret=...'; read it back
 # with eeprom(8). Empty (bare-metal or dev boot) -> the flag is dropped and the
-# daemon runs open. Never echoed, so it stays out of logs/console.
+# daemon falls back to HELIOS_SECRET, then /etc/helios/helios.json; with none it
+# still runs but DENIES every request (fail-closed), never open. Never echoed, so
+# it stays out of logs/console.
 _helios_secret=`eeprom helios-secret 2>/dev/null | sed -n 's/^helios-secret=//p'`
 if [ -n "$_helios_secret" ]; then
 	command_args="-d -p ${heliosagent_port} -l ${heliosagent_logfile} -P ${pidfile} -s ${_helios_secret}"

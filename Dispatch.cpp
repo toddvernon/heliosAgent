@@ -36,14 +36,19 @@ errorResponse( double id, CxString message )
 
 //-------------------------------------------------------------------------
 // Shared-secret auth (HELIOS_PLAN B7). The secret is set once at startup
-// (-s / HELIOS_SECRET, sourced from OBP `eeprom helios-secret` by the init
-// script). Require-if-configured: with no secret set, every request is
-// allowed (dev/tests). With a secret set, each request must carry a matching
-// "auth" string. Honest scope: a plaintext secret over the cleartext channel
-// is a speed-bump (kills unauthenticated/cross-VM/port-scan access; solid on
-// loopback), NOT crypto -- an HMAC/TLS upgrade is the LAN-case follow-up.
+// (-s / HELIOS_SECRET / -S file, sourced from OBP `eeprom helios-secret` by the
+// init script on the QEMU guests, or /etc/helios/helios.json on real servers).
+// Require-always (fail-closed): with a secret set, each request must carry a
+// matching "auth"; with NO secret set, every request is DENIED -- the daemon
+// keeps running but serves no one, so a missing/broken secret can never silently
+// fall open. The one escape hatch is heliosSetOpen(1) (the explicit -O /
+// "allow_open":true), for dev boxes that mean to run unauthenticated. Honest
+// scope: a plaintext secret over the cleartext channel is a speed-bump (kills
+// unauthenticated/cross-VM/port-scan access; solid on loopback), NOT crypto --
+// an HMAC/TLS upgrade is the LAN-case follow-up.
 //-------------------------------------------------------------------------
 static int      s_haveSecret = 0;
+static int      s_open       = 0;
 static CxString s_secret;
 
 void
@@ -55,6 +60,12 @@ heliosSetSecret( const char *secret )
     } else {
         s_haveSecret = 0;
     }
+}
+
+void
+heliosSetOpen( int open )
+{
+    s_open = open ? 1 : 0;
 }
 
 // Equality with no early-out on content (length may leak; the secret's length
@@ -74,12 +85,18 @@ secretEquals( const char *got, int gotLen )
     return r == 0;
 }
 
-// True if no secret is configured, or the request carries the matching "auth".
+// Require-always: allow only when running open, or the request carries the
+// matching "auth". With no secret configured (and not open) every request is
+// denied -- note this returns before secretEquals, so an empty configured
+// secret can never be matched by an empty "auth".
 static int
 authOk( CxJSONObject *req )
 {
+    if ( s_open ) {
+        return 1;                 // explicit open posture (-O / allow_open)
+    }
     if ( ! s_haveSecret ) {
-        return 1;
+        return 0;                 // require-always, nothing to match -> deny all
     }
     CxJSONMember *am = req->find( "auth" );
     if ( am == (CxJSONMember*)0 || am->object() == (CxJSONBase*)0
