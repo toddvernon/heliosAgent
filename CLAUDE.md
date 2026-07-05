@@ -45,19 +45,30 @@ committed or hand-edited.
 ## Auth (shared secret)
 Require-always / fail-closed. Each request must carry an `auth` string matching
 the daemon's secret; a wrong or absent one gets `ok:false` "unauthorized" (the
-streaming verbs close the connection). The secret is taken, in order, from:
-`-s <secret>`, `HELIOS_SECRET`, `-S <file>` / `HELIOS_SECRET_FILE`, then the
-default file `/etc/helios/helios.json`. That file is JSON --
-`{ "secret": "...", "allow_open": false }` -- and may carry a leading `#`
-comment banner above the object.
+streaming verbs close the connection).
+
+The secret is resolved once at startup from the first source that yields a
+non-empty value -- higher wins, and the lower sources are then ignored:
+
+1. `-s <secret>`                         (highest)
+2. `HELIOS_SECRET` env
+3. `-S <file>` / `HELIOS_SECRET_FILE`
+4. `/etc/helios/helios.json`             (default file; lowest)
+
+Sources 3 and 4 are a JSON file `{ "secret": "...", "allow_open": false }`,
+which may carry a leading `#` comment banner above the object.
 
 With NO secret from any source the daemon keeps running but DENIES every request
--- it never silently falls open, and a present-but-broken file (bad JSON/perms)
-also lands in deny-all. To run unauthenticated (dev only), pass `-O` or set
-`"allow_open": true`. The posture is logged loudly at startup.
+-- it never silently falls open, and a present-but-broken file (bad JSON/perms,
+or an explicit `-S` path that doesn't exist) also lands in deny-all. To run
+unauthenticated (dev only), pass `-O` (always) or set `"allow_open": true` in
+the file that is read; open then wins over any secret. The posture is logged
+loudly at startup.
 
 On the QEMU guests the init script supplies `-s` from OBP (`eeprom
-helios-secret`, set per-boot by macXserver); physical servers drop the secret in
+helios-secret`, set per-boot by macXserver), so it sits at rank 1 -- a
+`/etc/helios/helios.json` on a guest is silently ignored while an eeprom secret
+is set. Physical servers have no eeprom secret and drop the secret in
 `/etc/helios/helios.json` (mode 600). Because that file lives outside the binary,
 it survives an over-helios redeploy, so the restarted agent comes back
 authenticated with the same secret -- `deploy.sh` creates `/etc/helios` (0700)

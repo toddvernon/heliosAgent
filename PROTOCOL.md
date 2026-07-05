@@ -177,18 +177,33 @@ dropped connection.
 - Binds INADDR_ANY so it's reachable through slirp inside the guest, with
   SO_REUSEADDR set so a restart doesn't trip over a port in TIME_WAIT.
 - Shared-secret auth (require-always / fail-closed). Each request must carry an
-  `auth` string matching the daemon's secret. The secret is taken, in order,
-  from: `-s`, `HELIOS_SECRET`, `-S <file>` / `HELIOS_SECRET_FILE`, then the
-  default file `/etc/helios/helios.json` -- JSON `{ "secret": "...",
-  "allow_open": false }` with an optional leading `#` comment banner. On the
-  QEMU guests the init script supplies `-s` from OBP (`eeprom helios-secret`, set
-  per-boot by macXserver); physical servers use the file. With NO secret from any
-  source the daemon keeps running but DENIES every request -- it never silently
-  falls open. The only way to serve unauthenticated is the explicit `-O` flag or
-  `"allow_open": true` in the file (dev boxes). A wrong/absent `auth` returns
-  `ok:false` "unauthorized"; on the streaming verbs the connection is closed.
-  Honest scope: a plaintext secret on a cleartext channel is a speed-bump, not
-  crypto -- an HMAC/TLS upgrade is the LAN follow-up (HELIOS_PLAN.md B7).
+  `auth` string matching the daemon's secret; a wrong or absent one returns
+  `ok:false` "unauthorized" (the streaming verbs close the connection instead).
+
+  The secret is resolved once at startup from the **first source that yields a
+  non-empty value -- higher wins, and the lower sources are then ignored**:
+
+  1. `-s <secret>`                         (highest)
+  2. `HELIOS_SECRET` environment variable
+  3. `-S <file>` / `HELIOS_SECRET_FILE`
+  4. `/etc/helios/helios.json`             (default file; lowest)
+
+  Sources 3 and 4 are a JSON file `{ "secret": "...", "allow_open": false }`,
+  which may carry a leading `#` comment banner above the object. On the QEMU
+  guests the init script passes the OBP secret (`eeprom helios-secret`, set
+  per-boot by macXserver) as `-s`, so it sits at rank 1 -- which means a
+  `/etc/helios/helios.json` on a guest is silently ignored while an eeprom secret
+  is set. Physical servers have no eeprom secret, so they fall through to the
+  file.
+
+  With NO secret from any source the daemon keeps running but DENIES every
+  request -- it never silently falls open, and a present-but-broken file (bad
+  JSON/perms, or an explicit `-S` path that doesn't exist) also lands in
+  deny-all. Serving unauthenticated requires either the `-O` flag (always) or
+  `"allow_open": true` in whichever file is actually read; open then wins over
+  any secret. Honest scope: a plaintext secret on a cleartext channel is a
+  speed-bump, not crypto -- an HMAC/TLS upgrade is the LAN follow-up
+  (HELIOS_PLAN.md B7).
 - Runs as a proper daemon for the guest: `-d` double-forks and detaches, `-l`
   appends a timestamped/pid-stamped log (CxLogFile), `-P` writes a pidfile, and
   SIGTERM stops cleanly (removes the pidfile). `init/heliosAgent` is the SVR4
