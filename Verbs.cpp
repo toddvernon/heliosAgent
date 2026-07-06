@@ -1004,25 +1004,50 @@ verbSearch( double id, CxJSONObject *req )
         ignoreCase = ( (CxJSONBoolean*) icm->object() )->get();
     }
 
-    // max (optional number; default 1000)
+    // max (optional number; default 1000). Clamp <=0 to the default so a bogus
+    // value can't make the very first match report truncated:true / count:0.
     int maxMatches = 1000;
     CxJSONMember *mm = req->find( "max" );
     if ( mm != (CxJSONMember*)0 && mm->object() != (CxJSONBase*)0
          && mm->object()->type() == CxJSONBase::NUMBER ) {
         maxMatches = (int) ( (CxJSONNumber*) mm->object() )->get();
     }
+    if ( maxMatches <= 0 ) {
+        maxMatches = 1000;
+    }
 
-    // timeout_ms (optional number; absent/<=0 -> no timeout)
-    int timeout = 0;
+    // timeout_ms (optional number). Default to a bounded 60s rather than "no
+    // timeout": a path-less search (path defaults to ".") started from the
+    // daemon's cwd (typically "/") would otherwise be an unbounded recursive
+    // grep of the whole filesystem as root. Clients wanting longer pass an
+    // explicit timeout_ms.
+    int timeout = 60000;
     CxJSONMember *tm = req->find( "timeout_ms" );
     if ( tm != (CxJSONMember*)0 && tm->object() != (CxJSONBase*)0
          && tm->object()->type() == CxJSONBase::NUMBER ) {
-        timeout = (int) ( (CxJSONNumber*) tm->object() )->get();
+        int t = (int) ( (CxJSONNumber*) tm->object() )->get();
+        if ( t > 0 ) {
+            timeout = t;
+        }
+    }
+
+    // Absolute path to a capable grep, NOT a bare `grep`. The daemon's minimal
+    // init PATH would resolve `grep` to the base grep on Solaris 2.6 / SunOS
+    // 4.1.4, which has no -r and errors silently (exit 2, caught below). Override
+    // with HELIOS_GREP; else a per-OS compiled default: GNU grep where it's
+    // hand-installed (get-grep.sh), NetBSD's base grep already does -r/-H/-n.
+    const char *grepBin = getenv( "HELIOS_GREP" );
+    if ( grepBin == (const char*)0 || grepBin[0] == '\0' ) {
+#if   defined(_SUNOS_) || defined(_SOLARIS6_) || defined(_SOLARIS10_)
+        grepBin = "/usr/local/bin/grep";     // Solaris 2.6 / SunOS 4.1.4: GNU grep (get-grep.sh)
+#else
+        grepBin = "/usr/bin/grep";           // macOS dev / NetBSD: base grep does -rHn
+#endif
     }
 
     // grep -rHn: recursive, force filename, line numbers. -e guards a pattern
     // starting with '-'; -- ends options before the path. stderr -> /dev/null.
-    CxString cmd = CxString( "grep -rHn" );
+    CxString cmd = CxString( grepBin ) + CxString( " -rHn" );
     if ( ignoreCase ) {
         cmd = cmd + CxString( " -i" );
     }
@@ -1079,6 +1104,11 @@ verbSearch( double id, CxJSONObject *req )
         }
     }
 
+    // grep exit >=2 is a real error (bad option, grep not found at grepBin, or an
+    // unreadable path) -- report ok:false so a broken/missing grep stops
+    // masquerading as an empty result set. exit 0/1 (matches / no matches) are ok.
+    int grepFailed = ( rc >= 2 );
+
     CxJSONObject *result = new CxJSONObject();
     result->append( new CxJSONMember( "pattern",   new CxJSONString( pattern ) ) );
     result->append( new CxJSONMember( "path",      new CxJSONString( path ) ) );
@@ -1086,11 +1116,15 @@ verbSearch( double id, CxJSONObject *req )
     result->append( new CxJSONMember( "truncated", new CxJSONBoolean( truncated ) ) );
     result->append( new CxJSONMember( "exit_code", new CxJSONNumber( (double) rc ) ) );
     result->append( new CxJSONMember( "timed_out", new CxJSONBoolean( proc.wasTimedOut() ) ) );
+    if ( grepFailed ) {
+        result->append( new CxJSONMember( "error", new CxJSONString(
+            CxString( "grep failed (exit >= 2): grep missing/incompatible at its path, or unreadable search path" ) ) ) );
+    }
     result->append( new CxJSONMember( "matches",   matches ) );
 
     CxJSONObject resp;
     resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );
-    resp.append( new CxJSONMember( "ok",     new CxJSONBoolean( 1 ) ) );
+    resp.append( new CxJSONMember( "ok",     new CxJSONBoolean( grepFailed ? 0 : 1 ) ) );
     resp.append( new CxJSONMember( "result", result ) );
 
     return resp.toJsonString();

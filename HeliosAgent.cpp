@@ -222,22 +222,44 @@ reapChildren( int signo )
 //
 // Run the real shutdown command. Called by the server AFTER the shutdown ACK
 // has been sent, so the client always learns the guest is going down before it
-// does. The command is overridable via HELIOS_SHUTDOWN_CMD -- essential for dev
-// on the Mac, where the default `init 5` would shut down the developer's
-// machine. In the shipped guest it is left unset and defaults to init 5.
+// does.
+//
+// The command is overridable via HELIOS_SHUTDOWN_CMD (the dev override on the
+// Mac, where the guest default would power off the developer's machine). When
+// unset, the default is chosen at COMPILE time per guest OS, because this
+// daemon is built on each target -- an env var can be forgotten in an rc script
+// (it was, on every BSD guest), but a compiled default can't. Each is the
+// guest's canonical clean halt that also exits qemu under emulation, as an
+// ABSOLUTE path: this runs via /bin/sh with a minimal init PATH, so a bare
+// `halt` is "command not found". See PROTOCOL.md and MachineOS.shutdownCommand
+// (swift-x), which must stay in step with these.
+//   Solaris 2.6  -> /usr/sbin/init 5   (SVR4; syncs + powers off)
+//   SunOS 4.1.4  -> /usr/etc/halt       (BSD; syncs + halts)
+//   NetBSD       -> /sbin/halt          (syncs + halts; exits qemu, no -p)
 //-------------------------------------------------------------------------
 static void
 performShutdown( void )
 {
     const char *cmd = getenv( "HELIOS_SHUTDOWN_CMD" );
     if ( cmd == (const char*)0 || cmd[0] == '\0' ) {
-        cmd = "/usr/sbin/init 5";
+#if   defined(_NETBSD_)
+        cmd = "/sbin/halt";
+#elif defined(_SUNOS_)
+        cmd = "/usr/etc/halt";
+#else
+        cmd = "/usr/sbin/init 5";        // Solaris (and the dev/other default)
+#endif
     }
     heliosLog( 0, "shutdown requested; running: %s", cmd );
     if ( g_pidPath != (const char*)0 ) {
         unlink( g_pidPath );
     }
-    system( cmd );
+    // Check the result: a wrong/missing command (the old silent failure mode on
+    // the BSD guests) must show up in the log, not just quietly not power off.
+    int rc = system( cmd );
+    if ( rc != 0 ) {
+        heliosLog( 1, "shutdown command failed (rc=%d): %s -- guest may not power off", rc, cmd );
+    }
 }
 
 

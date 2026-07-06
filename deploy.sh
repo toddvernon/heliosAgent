@@ -106,6 +106,11 @@ SECRETDIR=/etc/helios
 SECRETFILE=$SECRETDIR/helios.json
 mkdir -p "$SECRETDIR"
 chmod 700 "$SECRETDIR"
+# If a secret file already exists, tighten its perms (never touch its contents):
+# it holds the plaintext shared secret and must not be group/other-readable.
+if [ -f "$SECRETFILE" ]; then
+	chmod 600 "$SECRETFILE"
+fi
 
 # --- lockout guard ---------------------------------------------------------
 # After the restart below the new daemon is fail-closed: with no OBP secret and
@@ -113,7 +118,13 @@ chmod 700 "$SECRETDIR"
 # itself, that drops the deploying client with no way back except ssh/console.
 # Warn loudly -- don't block, since a hand/ssh deploy is a legitimate way to
 # bootstrap the very first secret.
-EEPROM_SECRET=`eeprom helios-secret 2>/dev/null | grep '^helios-secret=' | sed 's/^helios-secret=//'`
+# Resolve eeprom to an absolute path (it's /usr/kvm/eeprom on SunOS 4.1.4, off
+# the PATH; /usr/sbin on Solaris) so this guard doesn't false-warn there.
+EEPROM=eeprom
+for _e in /usr/sbin/eeprom /usr/kvm/eeprom /usr/bin/eeprom; do
+	if [ -x "$_e" ]; then EEPROM="$_e"; break; fi
+done
+EEPROM_SECRET=`$EEPROM helios-secret 2>/dev/null | grep '^helios-secret=' | sed 's/^helios-secret=//'`
 if [ -z "$EEPROM_SECRET" ] && [ ! -f "$SECRETFILE" ]; then
 	echo "deploy: WARNING -- no OBP secret and no $SECRETFILE:"
 	echo "deploy:   the (re)started agent will DENY ALL requests (fail-closed)."

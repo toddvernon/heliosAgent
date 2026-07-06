@@ -63,13 +63,29 @@ shipped guest.
   - request: `{ "verb": "hello", "id": 1 }`
   - result: `{ "agent":"heliosAgent", "version":"0.1.0", "protocol":1,
               "host":"<hostname>", "uptime":<seconds the daemon has run> }`
-- `shutdown` -- graceful shutdown (`init 5`). **[implemented]**
+- `shutdown` -- graceful shutdown. **[implemented]**
   - request: `{ "verb": "shutdown", "id": 2 }`
   - result: `{ "status": "shutting down" }`
   - The agent ACKs first, then the server runs the shutdown command, so the
-    client always learns the guest is going down before it does. The command is
-    `/usr/sbin/init 5`, overridable via the `HELIOS_SHUTDOWN_CMD` env var (used
-    in dev so the default doesn't shut down the developer's Mac).
+    client always learns the guest is going down before it does.
+  - **The ACK confirms RECEIPT, not power-off.** The command runs after the
+    reply is on the wire and its result isn't awaited by the client, so a
+    successful `{"status":"shutting down"}` does not prove the guest went down.
+    Confirm power-off out of band (the qemu process exiting). A failed shutdown
+    command is logged (`shutdown command failed (rc=...)`) but the ACK already
+    went out -- this ACK-vs-poweroff gap hid a real bug for a while.
+  - **The command is per-OS**, and each must be an ABSOLUTE path (the daemon
+    runs it via `/bin/sh` with a minimal init PATH, so a bare `halt` is
+    "command not found"). It's chosen at compile time per guest, and overridable
+    at runtime via `HELIOS_SHUTDOWN_CMD` (the dev override, so the default
+    doesn't power off the developer's Mac):
+    - Solaris 2.6: `/usr/sbin/init 5`  (SVR4; syncs + powers off)
+    - SunOS 4.1.4: `/usr/etc/halt`
+    - NetBSD: `/sbin/halt`  (syncs + halts; exits qemu with no `-p` needed)
+
+    These must stay in step with `MachineOS.shutdownCommand` in the swift-x tree.
+    The former universal default `init 5` no-ops on the BSD guests (no SVR4
+    runlevels), so it silently failed to power them off.
 - `run_command` -- run a shell command on the Sun. **[implemented]**
   - request: `{ "verb":"run_command", "id":8, "cmd":"cc hello.c -o hello",
               "cwd":"/export/home/me", "timeout_ms":60000, "user":"me" }`
@@ -148,18 +164,26 @@ shipped guest.
     a readable directory.
 - `search` -- grep file contents on the guest. **[implemented]**
   - request: `{ "verb":"search", "id":60, "pattern":"TODO", "path":"src",
-              "ignore_case":false, "max":1000, "timeout_ms":0 }`
-    (`path` default ".", `max` default 1000; both `ignore_case` and `timeout_ms`
-    optional)
+              "ignore_case":false, "max":1000, "timeout_ms":30000 }`
+    (`path` default ".", `max` default 1000, `timeout_ms` default 60000; all of
+    `ignore_case`, `max`, `timeout_ms` optional)
   - result: `{ pattern, path, count, truncated, exit_code, timed_out,
-              matches:[ { file, line, text }, ... ] }`
-  - Shells native grep (`grep -rHn`, run where the files are), shell-quoting
-    the pattern and path so metacharacters can't inject, and discarding grep's
-    stderr so error text is never mis-parsed as a match. No-match (grep exit 1)
-    is `ok:true` with `count:0`; only a missing `pattern` is `ok:false`.
+              matches:[ { file, line, text }, ... ] [, error ] }`
+  - Shells grep (`<grep> -rHn`, run where the files are), shell-quoting the
+    pattern and path so metacharacters can't inject, and discarding grep's stderr
+    so error text is never mis-parsed as a match. No-match (grep exit 1) is
+    `ok:true` with `count:0`; a missing `pattern` is `ok:false`.
     `truncated:true` means `max` was hit (matches are not silently dropped).
-    NB: needs a grep that supports `-rHn -e` -- on Solaris that means GNU or
-    xpg4 grep (see HELIOS_PLAN.md A4), not stock `/usr/bin/grep`.
+  - **grep must be an ABSOLUTE path** to a capable grep -- a bare `grep` on the
+    daemon's minimal PATH resolves to a base grep with no `-r` on Solaris 2.6 /
+    SunOS 4.1.4, which errors. It's a per-OS compiled default (GNU grep at
+    `/usr/local/bin/grep` where installed; NetBSD's `/usr/bin/grep` is fine),
+    overridable via `HELIOS_GREP`. A grep error (exit >= 2: missing/incompatible
+    grep, or unreadable path) is now `ok:false` with an `error` field -- it no
+    longer masquerades as an empty result set.
+  - `timeout_ms` defaults to 60s rather than unbounded, so a path-less search
+    from the daemon's cwd (`/`) can't become a whole-filesystem grep; pass a
+    larger value for big searches.
 
 All eight v1 verbs are implemented. Unrecognized verbs return "unknown verb";
 malformed requests return a protocol error. Both are `ok:false`, never a

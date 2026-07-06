@@ -46,7 +46,15 @@ start)
 	# via ssh/console and drop a secret file. Never echoed -- it stays out of the
 	# logs/console. (Deliberately not quoted in -s so an empty SECRET drops the
 	# flag entirely rather than passing "".)
-	SECRET=`eeprom helios-secret 2>/dev/null | grep '^helios-secret=' | sed 's/^helios-secret=//'`
+	# Resolve eeprom to an ABSOLUTE path first. This script is shared with SunOS
+	# 4.1.4, where eeprom is /usr/kvm/eeprom -- NOT on the rc PATH -- so a bare
+	# `eeprom` came back empty, the -s flag dropped, and the daemon booted
+	# deny-all on every reboot. Solaris 2.6 keeps eeprom in /usr/sbin.
+	EEPROM=eeprom
+	for _e in /usr/sbin/eeprom /usr/kvm/eeprom /usr/bin/eeprom; do
+		if [ -x "$_e" ]; then EEPROM="$_e"; break; fi
+	done
+	SECRET=`$EEPROM helios-secret 2>/dev/null | grep '^helios-secret=' | sed 's/^helios-secret=//'`
 	# `-d` detaches once the daemon is bound + listening; a bind/listen failure
 	# exits nonzero *before* detaching, so the `&&` only fires on a real start.
 	# The "heliosAgent started" line lands on the boot console (this script's
