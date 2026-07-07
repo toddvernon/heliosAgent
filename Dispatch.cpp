@@ -155,6 +155,8 @@ heliosDispatch( CxString requestLine )
     CxString out;
     if ( verb == "hello" ) {
         out = verbHello( id );
+    } else if ( verb == "sysinfo" ) {
+        out = verbSysInfo( id );
     } else if ( verb == "shutdown" ) {
         out = verbShutdown( id );
     } else if ( verb == "run_command" ) {

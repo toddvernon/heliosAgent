@@ -61,8 +61,23 @@ shipped guest.
 
 - `hello` -- liveness handshake. **[implemented]**
   - request: `{ "verb": "hello", "id": 1 }`
-  - result: `{ "agent":"heliosAgent", "version":"0.1.0", "protocol":1,
+  - result: `{ "agent":"heliosAgent", "version":"0.2.0", "protocol":1,
               "host":"<hostname>", "uptime":<seconds the daemon has run> }`
+- `sysinfo` -- best-effort system stats (v0.2.0+). **[implemented]**
+  - request: `{ "verb": "sysinfo", "id": 2 }`
+  - result: `{ "uname":{ "sysname","release","machine","nodename" },
+              "hostid":"80eff4e5", "memMB":<physical RAM>,
+              "swap":{ "totalKB","usedKB" }, "load":[<1m>,<5m>,<15m>],
+              "disks":[ { "mount","sizeKB","usedPct" }, ... ],
+              "time":<guest epoch seconds>, "agentUptime":<seconds> }`
+  - **Every field except `time`/`agentUptime` is independently optional.** A
+    collector that fails on this box omits its field; the verb itself is
+    always `ok:true`. Collection is fork-free (syscalls / libc / kernel
+    memory; on SunOS 4 physmem/avenrun/anoninfo come via nlist + /dev/kmem,
+    the same way ps/pstat/uptime work there -- see SYSINFO_PLAN.md). hello
+    remains the liveness signal; clients must never infer "agent down" from
+    missing sysinfo fields. Older agents answer `unknown verb: sysinfo`;
+    clients treat that as "agent predates sysinfo" and degrade.
 - `shutdown` -- graceful shutdown. **[implemented]**
   - request: `{ "verb": "shutdown", "id": 2 }`
   - result: `{ "status": "shutting down" }`

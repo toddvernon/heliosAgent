@@ -13,6 +13,7 @@
 
 #include "Verbs.h"
 #include "HeliosVersion.h"
+#include "SysInfo.h"
 
 #include <cx/json/json_base.h>
 #include <cx/json/json_object.h>
@@ -80,6 +81,87 @@ verbHello( double id )
     result->append( new CxJSONMember( "protocol", new CxJSONNumber( (double) HELIOS_PROTOCOL_VERSION ) ) );
     result->append( new CxJSONMember( "host",     new CxJSONString( CxString( hostbuf ) ) ) );
     result->append( new CxJSONMember( "uptime",   new CxJSONNumber( (double) uptime ) ) );
+
+    CxJSONObject resp;
+    resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );
+    resp.append( new CxJSONMember( "ok",     new CxJSONBoolean( 1 ) ) );
+    resp.append( new CxJSONMember( "result", result ) );
+
+    return resp.toJsonString();
+}
+
+
+//-------------------------------------------------------------------------
+// verbSysInfo
+//
+// { "id":<id>, "ok":true, "result":{ [uname:{sysname,release,machine,
+//   nodename}], [hostid], [memMB], [swap:{totalKB,usedKB}], [load:[1,5,15]],
+//   [disks:[{mount,sizeKB,usedPct},...]], time, agentUptime } }
+//
+// Every bracketed field is independently optional: a collector that failed
+// on this box simply omits its field (SysInfo.h's prime directive). Always
+// ok:true -- there is no failure mode by design.
+//-------------------------------------------------------------------------
+CxString
+verbSysInfo( double id )
+{
+    SysInfoSnapshot snap;
+    sysInfoCollect( snap );
+
+    CxJSONObject *result = new CxJSONObject();
+
+    if ( snap.haveUname ) {
+        CxJSONObject *u = new CxJSONObject();
+        u->append( new CxJSONMember( "sysname",  new CxJSONString( CxString( snap.sysname ) ) ) );
+        u->append( new CxJSONMember( "release",  new CxJSONString( CxString( snap.release ) ) ) );
+        u->append( new CxJSONMember( "machine",  new CxJSONString( CxString( snap.machine ) ) ) );
+        u->append( new CxJSONMember( "nodename", new CxJSONString( CxString( snap.nodename ) ) ) );
+        result->append( new CxJSONMember( "uname", u ) );
+    }
+
+    if ( snap.haveHostid ) {
+        result->append( new CxJSONMember( "hostid", new CxJSONString( CxString( snap.hostid ) ) ) );
+    }
+
+    if ( snap.haveMemMB ) {
+        result->append( new CxJSONMember( "memMB", new CxJSONNumber( snap.memMB ) ) );
+    }
+
+    if ( snap.haveSwap ) {
+        CxJSONObject *sw = new CxJSONObject();
+        sw->append( new CxJSONMember( "totalKB", new CxJSONNumber( snap.swapTotalKB ) ) );
+        sw->append( new CxJSONMember( "usedKB",  new CxJSONNumber( snap.swapUsedKB ) ) );
+        result->append( new CxJSONMember( "swap", sw ) );
+    }
+
+    if ( snap.haveLoad ) {
+        CxJSONArray *ld = new CxJSONArray();
+        ld->append( new CxJSONNumber( snap.load1 ) );
+        ld->append( new CxJSONNumber( snap.load5 ) );
+        ld->append( new CxJSONNumber( snap.load15 ) );
+        result->append( new CxJSONMember( "load", ld ) );
+    }
+
+    if ( snap.diskCount > 0 ) {
+        CxJSONArray *disks = new CxJSONArray();
+        int i;
+        for ( i = 0; i < snap.diskCount; i++ ) {
+            CxJSONObject *d = new CxJSONObject();
+            d->append( new CxJSONMember( "mount",   new CxJSONString( CxString( snap.disks[i].mount ) ) ) );
+            d->append( new CxJSONMember( "sizeKB",  new CxJSONNumber( snap.disks[i].sizeKB ) ) );
+            d->append( new CxJSONMember( "usedPct", new CxJSONNumber( (double) snap.disks[i].usedPct ) ) );
+            disks->append( d );
+        }
+        result->append( new CxJSONMember( "disks", disks ) );
+    }
+
+    result->append( new CxJSONMember( "time", new CxJSONNumber( (double) snap.guestTime ) ) );
+
+    long uptime = (long)( time( (time_t*)0 ) - g_heliosStartTime );
+    if ( uptime < 0 ) {
+        uptime = 0;
+    }
+    result->append( new CxJSONMember( "agentUptime", new CxJSONNumber( (double) uptime ) ) );
 
     CxJSONObject resp;
     resp.append( new CxJSONMember( "id",     new CxJSONNumber( id ) ) );

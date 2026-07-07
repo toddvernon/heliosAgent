@@ -84,7 +84,8 @@ echo "=== compiling heliosAgent ==="
 OBJS=""
 compile "cx_apps/heliosAgent/Dispatch.cpp"
 compile "cx_apps/heliosAgent/Verbs.cpp"
-SHARED_APP_OBJS="$OBJS"          # Dispatch + Verbs (shared by daemon and test)
+compile "cx_apps/heliosAgent/SysInfo.cpp"
+SHARED_APP_OBJS="$OBJS"          # Dispatch + Verbs + SysInfo (daemon and test)
 
 OBJS=""
 compile "cx_apps/heliosAgent/HeliosAgent.cpp"   # contains main()

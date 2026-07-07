@@ -32,6 +32,7 @@
 
 #include "Dispatch.h"
 #include "Verbs.h"
+#include "SysInfo.h"
 
 // Verbs.cpp expects this symbol (normally defined in HeliosAgent.cpp's main
 // module, which we don't link into the test). Provide it here.
@@ -278,6 +279,81 @@ testHello( void )
     }
     delete o;
 }
+
+static void
+testSysInfo( void )
+{
+    printf( "\n== sysinfo ==\n" );
+
+    // Exercise the startup path too (kernel symbol lookup + /dev/kmem on
+    // SunOS 4; no-op elsewhere). Must never be fatal, root or not.
+    sysInfoStartup();
+
+    CxString resp = heliosDispatch( CxString( "{ \"verb\": \"sysinfo\", \"id\": 42 }" ) );
+    CxJSONObject *o = parseObject( resp );
+    check( o != (CxJSONObject*)0, "sysinfo response is a JSON object" );
+    if ( o == (CxJSONObject*)0 ) return;
+
+    // The verb has no failure mode by design.
+    check( getBool( o, "ok", 0 ) == 1, "sysinfo ok==true (always)" );
+    check( getNumber( o, "id", -1 ) == 42, "sysinfo echoes id" );
+
+    CxJSONObject *result = getObject( o, "result" );
+    check( result != (CxJSONObject*)0, "sysinfo has result object" );
+    if ( result == (CxJSONObject*)0 ) { delete o; return; }
+
+    // The two always-present fields.
+    check( getNumber( result, "time", 0 ) > 0, "result.time present and > 0" );
+    check( getNumber( result, "agentUptime", -1 ) >= 0, "result.agentUptime >= 0" );
+
+    // uname(2) works on every platform we build for; treat as expected.
+    CxJSONObject *un = getObject( result, "uname" );
+    check( un != (CxJSONObject*)0, "result.uname present" );
+    if ( un != (CxJSONObject*)0 ) {
+        check( getString( un, "sysname" ).length() > 0, "uname.sysname non-empty" );
+        check( getString( un, "release" ).length() > 0, "uname.release non-empty" );
+        check( getString( un, "machine" ).length() > 0, "uname.machine non-empty" );
+    }
+
+    // Everything else is optional by contract; when present it must be sane.
+    if ( result->find( "memMB" ) != (CxJSONMember*)0 ) {
+        check( getNumber( result, "memMB", 0 ) > 0, "memMB (present) > 0" );
+    }
+    CxJSONArray *load = getArray( result, "load" );
+    if ( load != (CxJSONArray*)0 ) {
+        check( load->entries() == 3, "load (present) has 3 entries" );
+    }
+    CxJSONObject *swap = getObject( result, "swap" );
+    if ( swap != (CxJSONObject*)0 ) {
+        check( getNumber( swap, "totalKB", -1 ) >= 0, "swap.totalKB (present) >= 0" );
+        check( getNumber( swap, "usedKB",  -1 ) >= 0, "swap.usedKB (present) >= 0" );
+    }
+    CxJSONArray *disks = getArray( result, "disks" );
+    if ( disks != (CxJSONArray*)0 ) {
+        check( disks->entries() > 0 && disks->entries() <= 8, "disks (present) 1..8 entries" );
+        CxJSONBase *b = disks->at( 0 );
+        if ( b != (CxJSONBase*)0 && b->type() == CxJSONBase::OBJECT ) {
+            CxJSONObject *d = (CxJSONObject*) b;
+            check( getString( d, "mount" ).length() > 0, "disk[0].mount non-empty" );
+            check( getNumber( d, "sizeKB", 0 ) > 0, "disk[0].sizeKB > 0" );
+            double pct = getNumber( d, "usedPct", -1 );
+            check( pct >= 0 && pct <= 100, "disk[0].usedPct in 0..100" );
+        }
+    }
+
+#if defined(_OSX_) || defined(_NETBSD_)
+    // On the dev Mac and NetBSD every collector is plain libc/sysctl: expect
+    // the full set, so a silently-broken collector can't hide behind
+    // "optional".
+    check( result->find( "memMB" ) != (CxJSONMember*)0, "memMB present on this platform" );
+    check( load != (CxJSONArray*)0, "load present on this platform" );
+    check( swap != (CxJSONObject*)0, "swap present on this platform" );
+    check( disks != (CxJSONArray*)0, "disks present on this platform" );
+#endif
+
+    delete o;
+}
+
 
 static void
 testUnknownVerb( void )
@@ -1001,6 +1077,7 @@ main( int argc, char **argv )
     heliosSetOpen( 1 );
 
     testHello();
+    testSysInfo();
     testUnknownVerb();
     testMissingVerb();
     testBadJson();

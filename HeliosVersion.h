@@ -12,7 +12,9 @@
 #define HELIOS_VERSION_H
 
 #define HELIOS_AGENT_NAME        "heliosAgent"
-#define HELIOS_VERSION           "0.1.0"
+// 0.2.0: sysinfo verb (additive; protocol unchanged -- old agents answer
+// "unknown verb" and the Mac side degrades gracefully).
+#define HELIOS_VERSION           "0.2.0"
 #define HELIOS_PROTOCOL_VERSION  1
 
 #endif

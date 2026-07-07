@@ -53,6 +53,7 @@ extern "C" {
 #include "Dispatch.h"
 #include "Verbs.h"
 #include "HeliosVersion.h"
+#include "SysInfo.h"
 
 // Provisional default listen port. The Mac side reaches this through a slirp
 // hostfwd (127.0.0.1:<hostport> -> guest:<this>). Port discipline and bind/auth
@@ -663,6 +664,11 @@ main( int argc, char** argv )
     } else {
         heliosLog( 0, "shared-secret auth enabled (source: %s)", secretSource );
     }
+
+    // One-time sysinfo setup (SunOS 4: kernel symbol lookup + a long-lived
+    // /dev/kmem fd). AFTER daemonize, so the detach can't close the fd.
+    // Never fatal: failure just means sysinfo omits the affected fields.
+    sysInfoStartup();
 
     heliosLog( 0, "heliosAgent %s (protocol %d) listening on port %d, pid %ld%s",
                HELIOS_VERSION, HELIOS_PROTOCOL_VERSION, port, (long) getpid(),

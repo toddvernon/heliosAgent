@@ -27,6 +27,14 @@ class CxSocket;       // the connection, for the streaming verbs (forward decl)
 // Liveness handshake: agent name, version, protocol, hostname, daemon uptime.
 CxString verbHello( double id );
 
+// Best-effort system stats: uname, hostid, physical memory, swap, load
+// averages, local-disk fullness, guest clock, agent uptime. Fork-free
+// (syscalls / libc / kernel memory -- see SysInfo.h) and every result field
+// is independently optional: a collector that fails on this box just omits
+// its field. Always ok:true. hello stays the liveness signal; a broken
+// sysinfo must never look like a dead agent.
+CxString verbSysInfo( double id );
+
 // Run a shell command on the Sun. Reads "cmd" (required), "cwd" (optional), and
 // "timeout_ms" (optional) from the request; returns
 // { exit_code, output, timed_out }. ok:true means the command was *run* (a

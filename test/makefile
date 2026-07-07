@@ -36,14 +36,23 @@ CX_LIBS = \
 	$(LIB_CX_PLATFORM_LIB_DIR)/$(LIB_CX_NET_NAME)     \
 	$(LIB_CX_PLATFORM_LIB_DIR)/$(LIB_CX_BASE_NAME)
 
-ALL_LIBS = $(CX_LIBS) $(PLATFORM_LIBS)
+# sysinfo: Solaris load average comes from libkstat (2.6 has no getloadavg).
+ifeq ($(PLATFORM_OS),solaris6)
+SYSINFO_LIBS = -lkstat
+endif
+ifeq ($(PLATFORM_OS),solaris10)
+SYSINFO_LIBS = -lkstat
+endif
+
+ALL_LIBS = $(CX_LIBS) $(PLATFORM_LIBS) $(SYSINFO_LIBS)
 
 # The test links the app's logic objects (Dispatch + Verbs), compiled here
 # from the parent dir, plus the test itself.
 OBJECTS = \
 	$(APP_OBJECT_DIR)/helios_test.o \
 	$(APP_OBJECT_DIR)/Dispatch.o    \
-	$(APP_OBJECT_DIR)/Verbs.o
+	$(APP_OBJECT_DIR)/Verbs.o       \
+	$(APP_OBJECT_DIR)/SysInfo.o
 
 ## Targets ####################################################
 
@@ -73,6 +82,7 @@ endif
 $(APP_OBJECT_DIR)/helios_test.o : helios_test.cpp
 $(APP_OBJECT_DIR)/Dispatch.o    : ../Dispatch.cpp
 $(APP_OBJECT_DIR)/Verbs.o       : ../Verbs.cpp
+$(APP_OBJECT_DIR)/SysInfo.o     : ../SysInfo.cpp
 
 .PRECIOUS: $(CX_LIBS)
 .SUFFIXES: .cpp .C .cc .cxx .o
