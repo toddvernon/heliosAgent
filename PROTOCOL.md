@@ -97,6 +97,7 @@ shipped guest.
     - Solaris 2.6: `/usr/sbin/init 5`  (SVR4; syncs + powers off)
     - SunOS 4.1.4: `/usr/etc/halt`
     - NetBSD: `/sbin/halt`  (syncs + halts; exits qemu with no `-p` needed)
+    - IRIX 6.5: `/etc/shutdown -y -g0 -i0`  (init 5 is NOT power-off on IRIX)
 
     These must stay in step with `MachineOS.shutdownCommand` in the swift-x tree.
     The former universal default `init 5` no-ops on the BSD guests (no SVR4

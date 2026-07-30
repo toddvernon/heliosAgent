@@ -7,6 +7,7 @@
 #   Solaris 2.6 (SunOS 5.x)  -- SysV init: /etc/init.d + rc2.d/S98 + rcN.d/K30
 #   NetBSD 9.x               -- rc.d: /etc/rc.d/heliosagent + rc.conf=YES
 #   SunOS 4.1.4 (SunOS 4.x)  -- old BSD: a managed stanza in /etc/rc.local
+#   IRIX 6.5                 -- SysV init like Solaris, plus chkconfig(1M) on
 #
 # Run as root on the guest, from the heliosAgent source dir, AFTER building:
 #
@@ -48,10 +49,17 @@ case "$OS" in
 			*)       PLATFORM=unknown ;;
 		esac ;;
 	NetBSD) PLATFORM=netbsd; MKOS=netbsd ;;
+	IRIX|IRIX64)
+		# 64-bit kernels report IRIX64 but run the same n32 userland; both
+		# map to the one irix6 build (keep in sync with cx/platform.mk).
+		case "$REL" in
+			6.5*) PLATFORM=irix; MKOS=irix6 ;;
+			*)    PLATFORM=unknown ;;
+		esac ;;
 	*)      PLATFORM=unknown ;;
 esac
 if [ "$PLATFORM" = unknown ]; then
-	echo "deploy: unsupported platform: $OS $REL (know solaris, netbsd, sunos4)"
+	echo "deploy: unsupported platform: $OS $REL (know solaris, netbsd, sunos4, irix)"
 	exit 1
 fi
 echo "deploy: platform = $PLATFORM ($OS $REL)"
@@ -178,6 +186,37 @@ if [ -x $INITDEST ]; then $INITDEST start; fi
 EOF
 		cp "$TMP" "$RCL"
 		rm -f "$TMP"
+	fi
+
+	echo "deploy: (re)starting heliosAgent"
+	"$INITDEST" restart
+	sleep 1
+	"$INITDEST" status
+	;;
+
+irix)
+	# SysV init like Solaris, but the script is chkconfig-aware and IRIX
+	# convention is lowercase names. No eeprom secret on SGI hardware -- the
+	# daemon reads /etc/helios/helios.json (the lockout guard above already
+	# warned if it's missing; `eeprom` not existing on IRIX is harmless there).
+	INITSRC=init/heliosagent.irix
+	INITDEST=/etc/init.d/heliosagent
+	if [ ! -f "$INITSRC" ]; then
+		echo "deploy: $INITSRC not found -- run from the heliosAgent source dir."
+		exit 1
+	fi
+	echo "deploy: installing control script -> $INITDEST"
+	cp "$INITSRC" "$INITDEST"
+	chmod 755 "$INITDEST"
+
+	echo "deploy: wiring SysV rc symlinks + chkconfig flag"
+	rm -f /etc/rc2.d/S98heliosagent
+	ln -s ../init.d/heliosagent /etc/rc2.d/S98heliosagent
+	rm -f /etc/rc0.d/K30heliosagent
+	ln -s ../init.d/heliosagent /etc/rc0.d/K30heliosagent
+	# The on/off flag lives in /etc/config/heliosagent; -f creates it.
+	if [ -x /sbin/chkconfig ]; then
+		/sbin/chkconfig -f heliosagent on
 	fi
 
 	echo "deploy: (re)starting heliosAgent"

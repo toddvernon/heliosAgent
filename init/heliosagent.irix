@@ -1,0 +1,83 @@
+#!/bin/sh
+#
+# heliosagent -- SysV init script for IRIX 6.5.
+#
+# IRIX is SVR4 like Solaris but adds chkconfig(1M) as the on/off switch: an
+# init.d script is expected to consult `/sbin/chkconfig <flag>` and do nothing
+# when the flag is off. The flag lives in /etc/config/heliosagent ("on"/"off").
+#
+# Install on the box:
+#
+#   cp heliosagent.irix /etc/init.d/heliosagent
+#   chmod 755 /etc/init.d/heliosagent
+#   ln -s ../init.d/heliosagent /etc/rc2.d/S98heliosagent
+#   ln -s ../init.d/heliosagent /etc/rc0.d/K30heliosagent
+#   /sbin/chkconfig -f heliosagent on
+#
+# (deploy.sh does all of this; this file is the reference / hand-install form.)
+#
+# No eeprom secret here: the OBP helios-secret dance is a SPARCplug-guest
+# mechanism (qemu -prom-env). Real hardware -- SGI like the real Suns -- gets
+# its shared secret from /etc/helios/helios.json, which the daemon reads on
+# its own. With no secret anywhere it runs but denies every request
+# (fail-closed); recover via ssh/console and drop a secret file.
+#
+# The daemon double-forks (-d), logs to LOG, and records its pid in PIDFILE so
+# stop/restart/status can find it. Bind/listen failures exit nonzero with a
+# message before detaching, so a bad start is visible here.
+
+BIN=/usr/local/bin/heliosAgent
+PORT=2125
+LOG=/var/log/heliosAgent.log
+PIDFILE=/var/run/heliosAgent.pid
+
+case "$1" in
+start)
+	# Honor the IRIX on/off flag; absent chkconfig (never on 6.5) = run.
+	if [ -x /sbin/chkconfig ] && ! /sbin/chkconfig heliosagent; then
+		exit 0
+	fi
+	if [ ! -x "$BIN" ]; then
+		echo "heliosAgent: $BIN not found or not executable"
+		exit 1
+	fi
+	# IRIX has no /var/run by default; create pidfile/log dirs first or the
+	# daemon starts but stop/restart/status go blind (same lesson as SunOS 4).
+	mkdir -p `dirname "$PIDFILE"` `dirname "$LOG"` 2>/dev/null
+	echo "Starting heliosAgent."
+	# `-d` detaches once the daemon is bound + listening; a bind/listen failure
+	# exits nonzero *before* detaching, so the `&&` only fires on a real start.
+	"$BIN" -d -p "$PORT" -l "$LOG" -P "$PIDFILE" && echo "heliosAgent started"
+	;;
+
+stop)
+	if [ -f "$PIDFILE" ]; then
+		PID=`cat "$PIDFILE"`
+		echo "Stopping heliosAgent (pid $PID)."
+		kill -TERM "$PID" 2>/dev/null
+	else
+		echo "heliosAgent: no pidfile, not running?"
+	fi
+	;;
+
+restart)
+	"$0" stop
+	sleep 1
+	"$0" start
+	;;
+
+status)
+	if [ -f "$PIDFILE" ] && kill -0 `cat "$PIDFILE"` 2>/dev/null; then
+		echo "heliosAgent running (pid `cat "$PIDFILE"`)."
+	else
+		echo "heliosAgent not running."
+	fi
+	;;
+
+*)
+	echo "Usage: $0 {start|stop|restart|status}"
+	exit 1
+	;;
+esac
+
+exit 0

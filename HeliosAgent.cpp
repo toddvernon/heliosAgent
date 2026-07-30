@@ -38,6 +38,18 @@ extern "C" {
 }
 #endif
 
+// IRIX's C++ headers declare signal(2)'s handler as `void (*)(...)` (SGI's
+// legacy C++ linkage convention), so a proper void(int) handler won't
+// convert and g++ dies with "prohibits conversion from (int) to (...)".
+// Cast the handler to their type at the call sites there; everywhere else
+// the handler passes through untouched. SIG_IGN/SIG_DFL need no cast (the
+// header defines them in its own type).
+#ifdef _IRIX6_
+#define HELIOS_SIGHANDLER(f) ( (void (*)(...)) (f) )
+#else
+#define HELIOS_SIGHANDLER(f) (f)
+#endif
+
 #include <cx/base/string.h>
 #include <cx/net/socket.h>
 #include <cx/net/inaddr.h>
@@ -212,7 +224,7 @@ reapChildren( int signo )
     while ( waitpid( -1, (int*)0, WNOHANG ) > 0 ) {
         ;
     }
-    signal( SIGCHLD, reapChildren );
+    signal( SIGCHLD, HELIOS_SIGHANDLER( reapChildren ) );
     errno = savedErrno;
     (void) signo;
 }
@@ -247,6 +259,8 @@ performShutdown( void )
         cmd = "/sbin/halt";
 #elif defined(_SUNOS_)
         cmd = "/usr/etc/halt";
+#elif defined(_IRIX6_)
+        cmd = "/etc/shutdown -y -g0 -i0";   // IRIX: init 5 is NOT power-off there
 #else
         cmd = "/usr/sbin/init 5";        // Solaris (and the dev/other default)
 #endif
@@ -585,9 +599,9 @@ main( int argc, char** argv )
     // A client vanishing mid-write must not take the daemon down.
     signal( SIGPIPE, SIG_IGN );
     // Reap per-connection child processes so they don't zombie.
-    signal( SIGCHLD, reapChildren );
+    signal( SIGCHLD, HELIOS_SIGHANDLER( reapChildren ) );
     // Clean stop on the signal an init K-script sends.
-    signal( SIGTERM, termHandler );
+    signal( SIGTERM, HELIOS_SIGHANDLER( termHandler ) );
 
     CxSocket server( AF_INET, SOCK_STREAM, 0 );
     if ( ! server.good() ) {

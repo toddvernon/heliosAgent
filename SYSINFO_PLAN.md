@@ -92,6 +92,15 @@ exactly this problem on exactly these systems. Lift, don't re-derive.
 | disks   | statfs(2) + getmntent(/etc/mtab)     | statvfs(2) + getmntent(/etc/mnttab)         | statvfs(2) + getmntinfo(3)       |
 | time    | time(2)                              | time(2)                                     | time(2)                          |
 
+IRIX 6.5 (`_IRIX6_`, added 2026-07-30) rides the same patterns: uname /
+gethostid / time as everywhere; memMB from sysmp(MP_SAGET, MPSA_RMINFO)
+physmem * pagesize (the interface top/osview use); swap from IRIX's swapctl
+query commands (SC_GETSWAPTOT / SC_GETFREESWAP, units of 512-byte blocks);
+disks statvfs + getmntent(/etc/mtab); load via kmem exactly like SunOS 4
+except the kernel is /unix, the symbol is "avenrun" (no underscore), and
+FSCALE is 1024 -- lifted from xload's `#ifdef sgi` branch (X11R6 contrib
+get_load.c), not re-derived.
+
 The SunOS 4 column is the fiddly one and the reason the agent's root privilege
 matters: physmem/avenrun/anonymous-swap live in the kernel, read via
 nlist(3) on /vmunix once at startup (cache the addresses) plus a short

@@ -398,6 +398,176 @@ sysInfoStartup( void )
 }
 
 //=========================================================================
+//  IRIX 6.5
+//
+//  Memory comes from sysmp(MP_SAGET, MPSA_RMINFO) -- the same interface
+//  top/osview use, no kernel memory involved. Swap totals come from IRIX's
+//  swapctl query extensions (SC_GETSWAPTOT / SC_GETFREESWAP, units of
+//  512-byte blocks). Load average has no syscall on 6.5; era-correct
+//  practice (xload, X11R6 contrib get_load.c, `#ifdef sgi`) is nlist(3) on
+//  /unix for `avenrun` (no underscore, FSCALE 1024) plus a /dev/kmem read
+//  -- the same machinery as the SunOS 4 branch below. Every step guarded: a
+//  failed nlist or open marks load permanently absent and the agent serves
+//  on. Disks are SVR4-style: getmntent over /etc/mtab + statvfs.
+//=========================================================================
+#elif defined(_IRIX6_)
+
+#include <nlist.h>
+#include <sys/sysmp.h>
+#include <sys/sysinfo.h>
+#include <sys/swap.h>
+#include <sys/statvfs.h>
+#include <mntent.h>
+
+// Kernel fixed-point scale for avenrun on sgi (xload get_load.c).
+#define HELIOS_IRIX_FSCALE 1024.0
+
+// avenrun's address in /unix, cached by sysInfoStartup; 0 = unavailable.
+static unsigned long s_addrAvenrun = 0;
+static int           s_kmemFd      = -1;
+
+// Bounded positioned read from kernel memory. 0 on failure.
+static int
+kmemRead( unsigned long addr, void *dst, int len )
+{
+    if ( s_kmemFd < 0 || addr == 0 ) {
+        return 0;
+    }
+    if ( lseek( s_kmemFd, (off_t)addr, SEEK_SET ) == (off_t)-1 ) {
+        return 0;
+    }
+    if ( read( s_kmemFd, dst, len ) != len ) {
+        return 0;
+    }
+    return 1;
+}
+
+static void
+collectHostid( SysInfoSnapshot &snap )
+{
+    long id = gethostid();
+    sprintf( snap.hostid, "%08lx", (unsigned long)id & 0xffffffffUL );
+    snap.haveHostid = 1;
+}
+
+static void
+collectMem( SysInfoSnapshot &snap )
+{
+    struct rminfo rm;
+    if ( sysmp( MP_SAGET, MPSA_RMINFO, (char*)&rm, (int)sizeof( rm ) ) < 0 ) {
+        return;
+    }
+    if ( rm.physmem == 0 ) {
+        return;
+    }
+    snap.memMB   = (double)rm.physmem * (double)getpagesize() / ( 1024.0 * 1024.0 );
+    snap.haveMemMB = 1;
+}
+
+static void
+collectLoad( SysInfoSnapshot &snap )
+{
+    long avenrun[3];
+    if ( ! kmemRead( s_addrAvenrun, avenrun, sizeof( avenrun ) ) ) {
+        return;
+    }
+    snap.load1  = (double)avenrun[0] / HELIOS_IRIX_FSCALE;
+    snap.load5  = (double)avenrun[1] / HELIOS_IRIX_FSCALE;
+    snap.load15 = (double)avenrun[2] / HELIOS_IRIX_FSCALE;
+    snap.haveLoad = 1;
+}
+
+static void
+collectSwap( SysInfoSnapshot &snap )
+{
+    off_t total = 0;
+    off_t freeb = 0;
+    if ( swapctl( SC_GETSWAPTOT, &total ) < 0 ) {
+        return;
+    }
+    if ( swapctl( SC_GETFREESWAP, &freeb ) < 0 ) {
+        return;
+    }
+    if ( total <= 0 ) {
+        return;
+    }
+    // 512-byte blocks -> KB.
+    snap.swapTotalKB = (double)total / 2.0;
+    snap.swapUsedKB  = (double)( total - freeb ) / 2.0;
+    snap.haveSwap = 1;
+}
+
+static void
+collectDisks( SysInfoSnapshot &snap )
+{
+    FILE *fp = setmntent( MOUNTED, "r" );     // /etc/mtab
+    if ( fp == (FILE*)0 ) {
+        return;
+    }
+    struct mntent *mt;
+    while ( ( mt = getmntent( fp ) ) != (struct mntent*)0 ) {
+        // IRIX pseudo filesystems mount from a '/'-prefixed source (/proc,
+        // /hw), so the shared isLocalDisk source test can't screen them
+        // (validated live: /proc reported itself as a 500MB disk). Gate on
+        // the fs type instead: efs and xfs are the local-disk types.
+        if ( strcmp( mt->mnt_type, "efs" ) != 0 &&
+             strcmp( mt->mnt_type, "xfs" ) != 0 ) {
+            continue;
+        }
+        struct statvfs sv;
+        if ( statvfs( mt->mnt_dir, &sv ) != 0 ) {
+            continue;
+        }
+        double bsize  = (double)( sv.f_frsize > 0 ? sv.f_frsize : sv.f_bsize );
+        double sizeKB = (double)sv.f_blocks * bsize / 1024.0;
+        if ( ! isLocalDisk( mt->mnt_fsname, sizeKB ) ) {
+            continue;
+        }
+        double used  = (double)( sv.f_blocks - sv.f_bfree ) * bsize / 1024.0;
+        double avail = (double)sv.f_bavail * bsize / 1024.0;
+        addDisk( snap, mt->mnt_dir, sizeKB, usedPercent( used, avail ) );
+    }
+    endmntent( fp );
+}
+
+void
+sysInfoStartup( void )
+{
+    // Preferred source for avenrun's address: ask the RUNNING kernel via
+    // sysmp(MP_KERNADDR, MPKA_AVENRUN) -- no dependence on /unix matching
+    // the booted kernel, no symbol table needed. Returns -1 on failure.
+    long kaddr = sysmp( MP_KERNADDR, MPKA_AVENRUN );
+    if ( kaddr != -1 ) {
+        s_addrAvenrun = (unsigned long)kaddr;
+    }
+
+    // Fallback: nlist(3) on the kernel image, the xload way (needs -lelf).
+    // Kernel path overridable for odd setups (and the fault drill) via
+    // HELIOS_KERNEL, same as the SunOS 4 branch.
+    if ( s_addrAvenrun == 0 ) {
+        const char *kernel = getenv( "HELIOS_KERNEL" );
+        if ( kernel == (const char*)0 || kernel[0] == '\0' ) {
+            kernel = "/unix";
+        }
+
+        struct nlist nl[2];
+        memset( (char*)nl, 0, sizeof( nl ) );
+        nl[0].n_name = (char*)"avenrun";
+        nl[1].n_name = (char*)0;
+
+        if ( nlist( (char*)kernel, nl ) >= 0 ) {
+            s_addrAvenrun = (unsigned long)nl[0].n_value;
+        }
+    }
+
+    s_kmemFd = open( "/dev/kmem", O_RDONLY );
+    if ( s_kmemFd >= 0 ) {
+        // Never leak the kernel-memory fd into run_command children.
+        fcntl( s_kmemFd, F_SETFD, 1 );        // FD_CLOEXEC
+    }
+}
+
+//=========================================================================
 //  SunOS 4.1.x (BSD)
 //
 //  physmem / avenrun / anoninfo live in kernel memory: nlist(3) resolves

@@ -3,8 +3,8 @@
 ## The Helios guest agent: a small TCP daemon that proxies command
 ## execution and filesystem access to a Mac-side client over one
 ## newline-delimited JSON channel. Built on cx, so it compiles the same
-## on macOS (dev), Linux, and Solaris (deploy). Structure mirrors
-## cx_apps/cm. See PROTOCOL.md.
+## on macOS (dev), Linux, Solaris, SunOS 4, NetBSD, and IRIX 6.5 (deploy).
+## Structure mirrors cx_apps/cm. See PROTOCOL.md.
 
 CPP=        g++
 SHELL=      /bin/sh
@@ -50,6 +50,13 @@ endif
 ifeq ($(PLATFORM_OS),solaris10)
 SYSINFO_LIBS = -lkstat
 endif
+# sysinfo: IRIX load average reads kernel memory; nlist(3) is not in libc.
+# xload's Imakefile says -lmld on SGI, but 6.5 has no n32 libmld (COFF-era,
+# o32 only) -- the n32 home of nlist is libelf (SVR4 style). Validated on
+# the Indigo 2026-07-30.
+ifeq ($(PLATFORM_OS),irix6)
+SYSINFO_LIBS = -lelf
+endif
 
 ALL_LIBS = $(CX_LIBS) $(CX_LIBS_BASE) $(PLATFORM_LIBS) $(SYSINFO_LIBS)
 
@@ -80,6 +87,14 @@ clean:
 
 install:
 ifeq ($(UNAME_S), sunos)
+	cp $(APP_OBJECT_DIR)/heliosAgent /usr/local/bin/heliosAgent
+	chmod 755 /usr/local/bin/heliosAgent
+endif
+ifeq ($(UNAME_S), irix)
+	cp $(APP_OBJECT_DIR)/heliosAgent /usr/local/bin/heliosAgent
+	chmod 755 /usr/local/bin/heliosAgent
+endif
+ifeq ($(UNAME_S), irix64)
 	cp $(APP_OBJECT_DIR)/heliosAgent /usr/local/bin/heliosAgent
 	chmod 755 /usr/local/bin/heliosAgent
 endif

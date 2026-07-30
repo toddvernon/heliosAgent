@@ -1122,6 +1122,8 @@ verbSearch( double id, CxJSONObject *req )
     if ( grepBin == (const char*)0 || grepBin[0] == '\0' ) {
 #if   defined(_SUNOS_) || defined(_SOLARIS6_) || defined(_SOLARIS10_)
         grepBin = "/usr/local/bin/grep";     // Solaris 2.6 / SunOS 4.1.4: GNU grep (get-grep.sh)
+#elif defined(_IRIX6_)
+        grepBin = "/usr/freeware/bin/grep";  // IRIX 6.5: GNU grep from the freeware tardist (base grep has no -r)
 #else
         grepBin = "/usr/bin/grep";           // macOS dev / NetBSD: base grep does -rHn
 #endif
